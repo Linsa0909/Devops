@@ -251,3 +251,59 @@ class PipelineEngine:
 
         PipelineEngine.update_progress(pipeline)
         pipeline.updated_at = datetime.now()
+
+    @staticmethod
+    def run_code_execution_loop(pipeline: Pipeline, requirement: str, design: str) -> dict:
+        """🔥 Code Execution Loop — 代码生成→pytest→修复→审查"""
+        from agents.developer import DeveloperAgent
+        from agents.tester import TesterAgent
+        from agents.reviewer import ReviewerAgent
+        from llm import LLMService as _LLMService
+
+        ws = f"workspace/{pipeline.id}"
+        active_rules = [{"rule_id": r.id, "title": r.title, "active": r.active} for r in pipeline.rules if r.active]
+        pipeline.logs.append(f"[CodeLoop] 🚀 启动 (workspace: {ws})")
+
+        # 1. DeveloperAgent
+        pipeline.logs.append("[CodeLoop] 1/4 DeveloperAgent...")
+        dev = DeveloperAgent(workspace=ws, llm=_LLMService()).execute(
+            requirement=requirement, design=design, rules=active_rules)
+        pipeline.logs.append(f"[CodeLoop] {len(dev.get('files',[]))} 文件, pytest={'OK' if dev.get('passed') else 'FAIL'}, 尝试={dev.get('attempts')}")
+
+        # 2. TesterAgent (基于真实结果)
+        pipeline.logs.append("[CodeLoop] 2/4 TesterAgent...")
+        test = TesterAgent(llm=_LLMService()).evaluate({
+            "success": dev.get("passed"), "passed": 1 if dev.get("passed") else 0,
+            "failed": 0 if dev.get("passed") else 1, "output": dev.get("final_output","")})
+        pipeline.logs.append(f"[CodeLoop] {'PASS' if test.get('pass') else 'FAIL'} — {test.get('reason','?')[:120]}")
+
+        # 3. ReviewerAgent
+        pipeline.logs.append("[CodeLoop] 3/4 ReviewerAgent...")
+        code = "\n\n".join(f"# {f.get('file_path','')}\n{f.get('content','')[:500]}" for f in dev.get("files",[]))
+        review = ReviewerAgent(llm=_LLMService()).review(
+            code=code, design=design, test_result=test,
+            rules=active_rules, exec_history=dev.get("fix_history",[]))
+        pipeline.logs.append(f"[CodeLoop] Score={review.get('score',0)}/100 — {review.get('summary','')[:100]}")
+
+        # 4. 标记任务
+        for task in pipeline.tasks:
+            if "后端代码" in task.name or "前端代码" in task.name:
+                task.status = TaskStatus.CODE_GENERATED
+            elif "单元测试" in task.name:
+                task.status = TaskStatus.TEST_PASSED if test.get("pass") else TaskStatus.TEST_FAILED
+            elif "E2E" in task.name:
+                task.status = TaskStatus.TEST_PASSED if dev.get("passed") else TaskStatus.TEST_FAILED
+            elif "合规审查" in task.name or "VERIFY" in task.name:
+                task.status = TaskStatus.VERIFY_PASSED if review.get("passed") else TaskStatus.VERIFY_FAILED
+
+        pipeline.logs.append(f"[CodeLoop] 📁 {dev.get('file_tree','')[:200]}")
+        PipelineEngine.update_progress(pipeline)
+        pipeline.updated_at = datetime.now()
+        return {"passed": dev.get("passed"), "tests": test, "reviews": review,
+                "fix_history": dev.get("fix_history",[]), "workspace_path": ws, "file_tree": dev.get("file_tree","")}
+
+    @staticmethod
+    def auto_advance(pipeline: Pipeline):
+        """
+        ⚠️ 保留兼容 — 新代码请使用 run_code_execution_loop()
+        """

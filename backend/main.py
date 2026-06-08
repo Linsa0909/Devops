@@ -163,10 +163,24 @@ async def gate_action(req: GateActionRequest):
     if not success:
         raise HTTPException(400, f"闸门 {req.gate_id} 不在待审批状态")
 
+    # 🔥 Gate1 放行后 → 启动 Code Execution Loop
+    if req.gate_id == "Gate1" and req.action == "approve":
+        pipeline.logs.append("[System] 🔥 Gate1 通过 → 启动 Code Execution Loop...")
+        # 提取需求和设计
+        req_content = next((a.content for a in pipeline.artifacts if a.type.value == "requirement"), pipeline.description)
+        design_content = next((a.content for a in pipeline.artifacts if a.type.value == "design"), "")
+        try:
+            loop_result = PipelineEngine.run_code_execution_loop(
+                pipeline, pipeline.description, design_content)
+            pipeline.logs.append(f"[System] ✅ Code Execution Loop 完成: "
+                                f"pytest={'PASS' if loop_result.get('passed') else 'FAIL'}, "
+                                f"review={loop_result.get('reviews',{}).get('score',0)}/100")
+        except Exception as e:
+            pipeline.logs.append(f"[System] ⚠️ Code Execution Loop 异常: {e}")
+
     # 放行后自动推进
     engine.auto_advance(pipeline)
     engine.update_progress(pipeline)
-
     return _to_response(pipeline)
 
 
