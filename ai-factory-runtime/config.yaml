@@ -1,0 +1,17 @@
+# AI Factory Runtime Configuration
+deepseek:
+  api_key: "${DEEPSEEK_API_KEY}"
+  base_url: "https://api.deepseek.com"
+
+runtime:
+  coverage_threshold: 85
+
+gates:
+  require_to_design: human_confirm
+  test_to_dev: human_confirm
+  review_to_deploy: always_required
+
+quality:
+  coverage_min: 85
+  ruff: must_pass
+  mypy: must_pass

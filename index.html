@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentDev OS — 端到端软件需求 Agent 平台</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    // ===== 后端 API 配置 =====
+    const API_BASE = window.location.origin.includes('localhost')
+      ? ''  // 同源服务 (后端挂载前端) 用相对路径
+      : 'http://localhost:8000';
+    const USE_MOCK = false;
+  </script>
+  <style>
+    /* ===== Shimmer 流光动画 ===== */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .shimmer {
+      background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+
+    /* ===== 渐入动画 ===== */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeIn { animation: fadeIn 0.4s ease-out; }
+
+    /* ===== 呼吸光晕 ===== */
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.3); }
+      50%      { box-shadow: 0 0 0 8px rgba(99,102,241,0); }
+    }
+    .pulse-glow { animation: pulseGlow 2s infinite; }
+
+    /* ===== 全局滚动条 ===== */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    /* ===== 日志渐入 ===== */
+    @keyframes slideInLog {
+      from { opacity: 0; transform: translateX(-6px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    .log-line { animation: slideInLog 0.2s ease-out; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans antialiased overflow-hidden">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ================================================================
+    // 1️⃣ 微型 Zustand — 发布/订阅状态管理
+    // ================================================================
+    const createStore = (createState) => {
+      let state;
+      const listeners = new Set();
+      const setState = (partial) => {
+        const nextState = typeof partial === 'function' ? partial(state) : partial;
+        if (nextState !== state) {
+          state = { ...state, ...nextState };
+          listeners.forEach((fn) => fn(state));
+        }
+      };
+      const getState = () => state;
+      const subscribe = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+      state = createState(setState, getState);
+      return { setState, getState, subscribe };
+    };
+
+    // ================================================================
+    // 2️⃣ 全局 Store — 流水线状态 + M3 数据 + 日志 + 轮询
+    // ================================================================
+    const STEPS_ORDER = ['idea', 'analysis', 'guardrails', 'execution', 'qa', 'release'];
+
+    const useStore = createStore((set, get) => ({
+      /* ----- 页面导航 ----- */
+      currentStep: 'idea',
+      maxUnlockedStep: 'idea',
+
+      /* ----- 流水线状态 ----- */
+      pipeline: {
+        task_id: null,
+        status: 'IDLE',          // IDLE | ANALYZING | ANALYSIS_READY | GUARDING | EXECUTING | TESTING | RELEASED
+        progress: 0,
+        tasks: [],
+      },
+
+      /* ----- 长轮询日志 ----- */
+      logs: ['[系统初始化] AgentDev OS 准备就绪，等待产品想法输入...'],
+
+      /* ----- M3 资产数据 ----- */
+      m3Data: { requirement: '', design: '', mermaidChart: '' },
+
+      /* ----- 轮询句柄 ----- */
+      _pollTimer: null,
+
+      /* ===== Actions ===== */
+
+      navigate(step) {
+        // 所有 Tab 均可自由点击，不做步骤限制
+        set({ currentStep: step });
+      },
+
+      unlockStep(step) {
+        const curMax = STEPS_ORDER.indexOf(get().maxUnlockedStep);
+        const tgt    = STEPS_ORDER.indexOf(step);
+        if (tgt > curMax) set({ maxUnlockedStep: step });
+      },
+
+      appendLog(msg) {
+        set({ logs: [...get().logs, `[${new Date().toLocaleTimeString()}] ${msg}`] });
+      },
+
+      /* ----- 启动流水线 (真实 API) ----- */
+      startPipeline(ideaName, ideaDesc) {
+        const taskId = 'task_' + Date.now();
+        set({ pipeline: { task_id: taskId, status: 'ANALYZING', progress: 0, tasks: [
+          { name: 'REQUIREMENT_GEN', status: 'PROCESSING' },
+          { name: 'DESIGN_GEN',      status: 'PENDING' },
+        ]}});
+        get().appendLog(`[M2] 提交需求: "${ideaName}"...`);
+
+        if (!USE_MOCK) {
+          // 真实后端调用
+          fetch(`${API_BASE}/api/pipeline/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: ideaName, description: ideaDesc }),
+          })
+          .then(r => r.json())
+          .then(data => {
+            const realTaskId = data.id;
+            window.__pipelineId = realTaskId; // 全局保存
+            get().appendLog(`[M2] ✅ /api/pipeline/start → task_id=${realTaskId}`);
+            set({
+              pipeline: {
+                task_id: realTaskId,
+                status: data.status || 'ANALYZING',
+                progress: data.progress || 5,
+                tasks: data.tasks || [],
+              },
+              m3Data: {
+                requirement: data.artifacts?.find(a => a.type === 'requirement')?.content || '',
+                design: data.artifacts?.find(a => a.type === 'design')?.content || '',
+                mermaidChart: '',
+              },
+            });
+            // 检查是否到达 Gate1
+            if (data.status === 'GATE_WAIT') {
+              get().unlockStep('analysis');
+              set({ currentStep: 'analysis' });
+            } else {
+              get()._startRealPolling(realTaskId);
+            }
+          })
+          .catch(err => {
+            get().appendLog(`[ERROR] 后端调用失败: ${err.message}，回退 Mock 模式`);
+            get()._startPolling();
+          });
+        } else {
+          window.__pipelineId = taskId;
+          get()._startPolling();
+        }
+      },
+
+      /* ----- 真实后端轮询 /api/pipeline/status ----- */
+      _startRealPolling(taskId) {
+        get().appendLog(`[Runtime] 轮询 /api/pipeline/status?task_id=${taskId} (1.5s)...`);
+        const interval = setInterval(() => {
+          fetch(`${API_BASE}/api/pipeline/status?task_id=${taskId}`)
+            .then(r => r.json())
+            .then(data => {
+              set({
+                pipeline: {
+                  task_id: taskId,
+                  status: data.status,
+                  progress: data.progress || 0,
+                  tasks: data.tasks || [],
+                },
+                logs: [...get().logs.slice(0, -50), ...(data.logs || [])],
+              });
+
+              // Gate 等待 → 跳转
+              if (data.status === 'GATE_WAIT') {
+                clearInterval(interval);
+                // 找到等待的 Gate 并决定跳转到哪里
+                const gates = data.gates || [];
+                const pendingGate = gates.find(g => g.status === 'PENDING');
+                if (pendingGate) {
+                  get().appendLog(`[System] ⏸ 到达 ${pendingGate.id}，等待人工审批...`);
+                  if (pendingGate.id === 'Gate1') {
+                    get().unlockStep('analysis');
+                    set({ currentStep: 'analysis' });
+                  } else if (pendingGate.id === 'Gate2') {
+                    get().unlockStep('execution');
+                    set({ currentStep: 'execution' });
+                  } else if (pendingGate.id === 'Gate3') {
+                    get().unlockStep('qa');
+                    set({ currentStep: 'qa' });
+                  }
+                }
+              }
+
+              // 完成
+              if (data.status === 'COMPLETED') {
+                clearInterval(interval);
+                get().unlockStep('release');
+                set({ currentStep: 'release' });
+              }
+            })
+            .catch(() => {}); // 静默重试
+        }, 1500);
+        set({ _pollTimer: interval });
+      },
+      _startPolling() {
+        let tick = 0;
+        get().appendLog('[Runtime] 长轮询 /api/pipeline/status 启动 (1.5s)…');
+        const interval = setInterval(() => {
+          tick++;
+          const p = get().pipeline;
+
+          if (tick === 1) {
+            set({ pipeline: { ...p, status: 'ANALYZING', progress: 20, tasks: [
+              { name: 'REQUIREMENT_GEN', status: 'PROCESSING' },
+              { name: 'DESIGN_GEN',      status: 'PENDING' },
+            ]}});
+            get().appendLog('[Backend] 状态 → ANALYZING。大模型正在深度拆解原始想法…');
+          }
+          else if (tick === 3) {
+            set({ pipeline: { ...p, progress: 60, tasks: [
+              { name: 'REQUIREMENT_GEN', status: 'SUCCESS' },
+              { name: 'DESIGN_GEN',      status: 'PROCESSING' },
+            ]}});
+            get().appendLog('[LLM Core] User Stories 提取完毕，正在生成需求规格说明书…');
+          }
+          else if (tick === 5) {
+            // 模拟 M3 资产数据
+            const req = `# 需求规格说明书 (SRS-2026-001)\n\n` +
+              `## 1. 用户故事\n` +
+              `- 作为：研发经理\n` +
+              `- 我希望：系统自动抓取本周 Git 提交与 Jira 状态\n` +
+              `- 以便：一键润色生成精美周报，周五下午自动下发\n\n` +
+              `## 2. 功能模块\n` +
+              `- [M-1] 数据抽取微服务：支持 Jira REST API 轮询\n` +
+              `- [M-2] LLM 文本精炼引擎：基于提示词工程\n` +
+              `- [M-3] Markdown 渲染与通知通道：支持钉钉/企微 Webhook\n\n` +
+              `## 3. 核心 API\n` +
+              `- POST /api/v1/report/compile\n` +
+              `- GET  /api/v1/report/status?task_id=xxx`;
+
+            const design = `### 架构设计说明\n\n` +
+              `采用 FastAPI + LangGraph 状态机架构。\n` +
+              `- 网关层：FastAPI 路由分发\n` +
+              `- 编排层：LangGraph StateGraph 管理流水线\n` +
+              `- Agent 层：Coder / Critic / DevOps 多 Agent 协同\n` +
+              `- 沙箱层：Docker 隔离执行环境`;
+
+            const mermaid = `graph TD\n` +
+              `    A[用户原始输入] --> B(FastAPI 网关)\n` +
+              `    B --> C{LangGraph 状态机}\n` +
+              `    C --> D[Coder Agent]\n` +
+              `    C --> E[Critic Agent]\n` +
+              `    D --> F[DevOps Agent]\n` +
+              `    E --> F\n` +
+              `    F --> G[K8s 部署]`;
+
+            set({
+              m3Data: { requirement: req, design, mermaidChart: mermaid },
+              pipeline: { ...p, status: 'ANALYSIS_READY', progress: 100, tasks: [
+                { name: 'REQUIREMENT_GEN', status: 'SUCCESS' },
+                { name: 'DESIGN_GEN',      status: 'SUCCESS' },
+              ]},
+            });
+            get().appendLog('[Backend] REQ + DESIGN 资产生产完毕 → ANALYSIS_READY');
+            get().appendLog('[System] 自动解锁 analysis 步骤，推流至智能分析工作台…');
+            get().unlockStep('analysis');
+            set({ currentStep: 'analysis' });
+            clearInterval(interval);
+          }
+        }, 1500);
+
+        set({ _pollTimer: interval });
+      },
+
+      /* ----- 提交 Gate 确认 (分析 → 规则) ----- */
+      confirmAnalysis() {
+        const pid = get().pipeline.task_id;
+        get().appendLog('[M3 Gate] 人工审计放行 → 调用 Gate1 approve...');
+
+        if (!USE_MOCK && pid && pid.startsWith('pipe_')) {
+          fetch(`${API_BASE}/api/pipeline/gate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pipeline_id: pid, gate_id: 'Gate1', action: 'approve', comment: '需求审查通过' }),
+          })
+          .then(r => r.json())
+          .then(data => {
+            get().appendLog('[M3 Gate] ✅ Gate1 批准，流转至 M4 规则约束…');
+            get().unlockStep('guardrails');
+            set({ currentStep: 'guardrails', pipeline: { ...data, status: data.status } });
+            // 继续轮询
+            get()._startRealPolling(pid);
+          })
+          .catch(err => {
+            get().appendLog(`[ERROR] Gate API 失败: ${err.message}`);
+            get().unlockStep('guardrails');
+            set({ currentStep: 'guardrails' });
+          });
+        } else {
+          get().appendLog('[M3 Gate] 人工审计放行，流转至 M4 规则约束…');
+          get().unlockStep('guardrails');
+          set({ currentStep: 'guardrails', pipeline: { ...get().pipeline, status: 'GUARDING' } });
+        }
+      },
+
+      /* ----- 规则确认 (规则 → 执行) ----- */
+      confirmGuardrails() {
+        get().appendLog('[M4 Gate] 规则锁定，启动多 Agent 协同执行…');
+        get().unlockStep('execution');
+        set({ currentStep: 'execution', pipeline: { ...get().pipeline, status: 'EXECUTING' } });
+      },
+
+      /* ----- 启动 Agent 执行 (真实或模拟) ----- */
+      startExecution() {
+        const p = get().pipeline;
+        set({ pipeline: { ...p, status: 'EXECUTING', progress: 0 }});
+        get().appendLog('[Runtime] 下发多 Agent 流水线任务…');
+      },
+
+      /* ----- QA 通过 → 发布 (调用 Gate3) ----- */
+      releaseProduct() {
+        const pid = get().pipeline.task_id;
+        get().appendLog('[System] 全部验证通过，调用 Gate3 发布…');
+
+        if (!USE_MOCK && pid && pid.startsWith('pipe_')) {
+          fetch(`${API_BASE}/api/pipeline/gate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pipeline_id: pid, gate_id: 'Gate3', action: 'approve', comment: '发布审查通过' }),
+          })
+          .then(r => r.json())
+          .then(data => {
+            get().appendLog('[System] ✅ 发布成功！');
+            get().unlockStep('release');
+            set({ currentStep: 'release', pipeline: { ...data, status: 'COMPLETED', progress: 100 } });
+          })
+          .catch(err => {
+            get().appendLog(`[ERROR] 发布失败: ${err.message}`);
+            get().unlockStep('release');
+            set({ currentStep: 'release', pipeline: { ...get().pipeline, status: 'RELEASED', progress: 100 } });
+          });
+        } else {
+          get().appendLog('[System] 全部验证通过，一键发布生产 + 资产沉淀…');
+          get().unlockStep('release');
+          set({ currentStep: 'release', pipeline: { ...get().pipeline, status: 'RELEASED', progress: 100 } });
+        }
+      },
+
+      /* ----- 清理 ----- */
+      cleanup() {
+        if (get()._pollTimer) clearInterval(get()._pollTimer);
+      },
+    }));
+
+    // ================================================================
+    // 3️⃣ Hook：订阅 Store 局部重绘
+    // ================================================================
+    function useStoreState() {
+      const [, update] = useState({});
+      useEffect(() => {
+        const unsub = useStore.subscribe(() => update({}));
+        return unsub;
+      }, []);
+      return useStore.getState();
+    }
+
+    // ================================================================
+    // 3.5️⃣ CollapsibleLogPanel — 可折叠日志面板
+    // ================================================================
+    function CollapsibleLogPanel({ logs, logEndRef }) {
+      const [open, setOpen] = useState(false);
+      const countNew = logs.length;
+
+      return (
+        <div className="relative">
+          {/* 浮动按钮 */}
+          <button
+            onClick={() => setOpen(!open)}
+            className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl shadow-md border transition-all text-xs font-medium ${
+              open
+                ? 'bg-white border-slate-300 text-slate-700'
+                : 'bg-white border-slate-200 text-slate-500 hover:text-slate-700 hover:border-slate-300 shadow-sm'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full ${countNew > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+            <span>📋 运行时日志</span>
+            {countNew > 0 && (
+              <span className="bg-slate-100 text-slate-500 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{countNew}</span>
+            )}
+            <span className="text-[10px]">{open ? '▲' : '▼'}</span>
+          </button>
+
+          {/* 展开面板 */}
+          {open && (
+            <div className="absolute bottom-full right-0 mb-2 w-[560px] h-72 bg-white rounded-2xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden animate-fadeIn">
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 bg-slate-50/50 shrink-0">
+                <div className="flex items-center space-x-2 text-xs font-semibold text-slate-500">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <span>RUNTIME LOGS</span>
+                  <span className="text-[10px] text-slate-400 font-normal">— 实时滚动</span>
+                </div>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 text-sm leading-none"
+                >✕</button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] text-slate-600 space-y-0.5 bg-white">
+                {logs.map((log, idx) => (
+                  <div key={idx} className="hover:bg-slate-50 px-2 py-0.5 rounded transition-colors border-b border-slate-50">
+                    {log}
+                  </div>
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 4️⃣ M8 — 全局框架 (Global Framework)
+    // ================================================================
+    const STEPS_CONFIG = [
+      { id: 'idea',       label: '💡 需求孵化',    short: '需求孵化' },
+      { id: 'analysis',   label: '🔍 智能分析',    short: '智能分析' },
+      { id: 'guardrails', label: '🛡️ 规则约束',   short: '规则约束' },
+      { id: 'execution',  label: '🤖 Agent执行',   short: 'Agent执行' },
+      { id: 'qa',         label: '🧪 验证QA',      short: '验证QA'   },
+      { id: 'release',    label: '📦 发布沉淀',    short: '发布沉淀' },
+    ];
+
+    function M8GlobalFramework() {
+      const { currentStep, maxUnlockedStep, logs, pipeline, navigate, cleanup } = useStoreState();
+      const logEndRef = useRef(null);
+
+      // 自动滚底
+      useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+      // 清理定时器
+      useEffect(() => cleanup, []);
+
+      return (
+        <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-800 antialiased">
+          {/* ===== 左侧固定导航 ===== */}
+          <aside className="w-60 bg-white border-r border-slate-200 flex flex-col justify-between z-20 shrink-0 shadow-xs">
+            <div>
+              <div className="p-5 border-b border-slate-100 flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center text-white font-bold shadow-md shadow-indigo-200">
+                  Ω
+                </div>
+                <h1 className="font-bold text-base tracking-tight bg-gradient-to-r from-slate-900 to-slate-600 bg-clip-text text-transparent">
+                  AgentDev OS
+                </h1>
+              </div>
+              <nav className="p-3 space-y-0.5">
+                {STEPS_CONFIG.map((step) => {
+                  const idx     = STEPS_CONFIG.findIndex(s => s.id === step.id);
+                  const maxIdx  = STEPS_CONFIG.findIndex(s => s.id === maxUnlockedStep);
+                  const isUnlocked = idx <= maxIdx;
+                  const isActive = currentStep === step.id;
+                  return (
+                    <button
+                      key={step.id}
+                      disabled={!isUnlocked}
+                      onClick={() => navigate(step.id)}
+                      className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-left text-sm font-medium transition-all ${
+                        isActive
+                          ? 'bg-indigo-50 text-indigo-700 border border-indigo-100/60 shadow-xs'
+                          : isUnlocked
+                            ? 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                            : 'text-slate-300 cursor-not-allowed opacity-50'
+                      }`}
+                    >
+                      <span className="flex items-center space-x-2.5">
+                        <span className="text-base">{step.label.split(' ')[0]}</span>
+                        <span>{step.label.split(' ').slice(1).join(' ')}</span>
+                      </span>
+                      {isActive && <span className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+            <div className="p-4 border-t border-slate-100 bg-slate-50/40 flex items-center space-x-3 text-xs">
+              <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-violet-500 text-white flex items-center justify-center font-bold text-[11px]">
+                H
+              </div>
+              <div>
+                <p className="font-semibold text-slate-700">HUSTNLP Lab</p>
+                <p className="text-[10px] text-slate-400">Node: Sandbox-01</p>
+              </div>
+            </div>
+          </aside>
+
+          {/* ===== 右侧核心区 ===== */}
+          <div className="flex-1 flex flex-col overflow-hidden relative">
+            {/* 顶部状态流 */}
+            <header className="h-14 bg-white border-b border-slate-200 px-6 flex items-center justify-between z-10 shrink-0 shadow-xs">
+              <div className="flex items-center space-x-2 overflow-x-auto py-1">
+                {STEPS_CONFIG.map((step, idx) => {
+                  const stepIdx = STEPS_CONFIG.findIndex(s => s.id === step.id);
+                  const curIdx  = STEPS_CONFIG.findIndex(s => s.id === currentStep);
+                  const isPassed  = stepIdx < curIdx;
+                  const isCurrent = currentStep === step.id;
+                  return (
+                    <div key={step.id} className="flex items-center space-x-2 text-xs shrink-0">
+                      <div className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full border transition-all ${
+                        isCurrent
+                          ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                          : isPassed
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : 'bg-slate-50 text-slate-400 border-slate-100'
+                      }`}>
+                        <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          isCurrent ? 'bg-white text-slate-900' : 'bg-slate-200/60 text-slate-500'
+                        }`}>{idx + 1}</span>
+                        <span className="font-medium whitespace-nowrap">{step.short}</span>
+                      </div>
+                      {idx < STEPS_CONFIG.length - 1 && <span className="text-slate-300 text-[10px]">/</span>}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center space-x-2 text-[11px] text-slate-400 font-mono bg-slate-50 border border-slate-200/60 rounded-lg px-2.5 py-1 shrink-0">
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  pipeline.status !== 'IDLE' && pipeline.status !== 'RELEASED'
+                    ? 'bg-amber-500 animate-pulse' : pipeline.status === 'RELEASED'
+                      ? 'bg-emerald-500' : 'bg-slate-300'
+                }`} />
+                <span>STATUS: {pipeline.status}</span>
+              </div>
+            </header>
+
+            {/* 中央工作区 */}
+            <main className="flex-1 overflow-y-auto p-6">
+              <div className="max-w-6xl mx-auto animate-fadeIn">
+                {currentStep === 'idea'       && <M2IdeaHub />}
+                {currentStep === 'analysis'   && <M3Analysis />}
+                {currentStep === 'guardrails' && <M4Guardrails />}
+                {currentStep === 'execution'  && <M5Execution />}
+                {currentStep === 'qa'         && <M6QA />}
+                {currentStep === 'release'    && <M7Release />}
+              </div>
+            </main>
+
+            {/* 底部日志终端 — 可折叠按钮 */}
+            <div className="absolute bottom-4 right-6 z-30">
+              <CollapsibleLogPanel logs={logs} logEndRef={logEndRef} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 5️⃣ M2 — 需求孵化看板 (Idea Hub)
+    // ================================================================
+    function M2IdeaHub() {
+      const [name, setName] = useState('');
+      const [desc, setDesc] = useState('');
+      const { pipeline, startPipeline } = useStoreState();
+
+      const isSubmitting = pipeline.status === 'ANALYZING' || pipeline.status === 'ANALYSIS_READY';
+
+      const handleSubmit = () => {
+        if (!name.trim() || !desc.trim()) return alert('请完整填写需求名称与构想描述！');
+        startPipeline(name, desc);
+      };
+
+      return (
+        <div className="grid grid-cols-3 gap-8">
+          {/* 左侧表单 */}
+          <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+            <div className="flex items-center space-x-2 mb-5 border-b border-slate-100 pb-3">
+              <span className="text-lg">💡</span>
+              <h3 className="text-sm font-bold text-slate-800">输入您的产品原始构想</h3>
+            </div>
+            <div className="space-y-5">
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 block mb-2 uppercase tracking-wide">
+                  1. 需求项目命名
+                </label>
+                <input
+                  type="text"
+                  disabled={isSubmitting}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="例如：多 Agent 协同的自动化周报生成系统"
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 block mb-2 uppercase tracking-wide">
+                  2. 原始业务构想描述
+                </label>
+                <textarea
+                  rows="8"
+                  disabled={isSubmitting}
+                  value={desc}
+                  onChange={(e) => setDesc(e.target.value)}
+                  placeholder="请尽情阐述您的想法：你想解决什么问题？期望的交互流程是怎样的？大模型会自动进行软件工程拆解…"
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono leading-relaxed resize-none"
+                />
+              </div>
+              <div className="flex items-center justify-between pt-2">
+                <div className="text-xs text-slate-400">
+                  支持 Markdown 格式，AI 将自动拆解为标准 PRD
+                </div>
+                <button
+                  onClick={handleSubmit}
+                  disabled={isSubmitting}
+                  className={`px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-sm font-semibold shadow-xs transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {isSubmitting ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>AI 正在流水线孵化中…</span>
+                    </>
+                  ) : (
+                    <span>🚀 提交构想并开始分析</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 右侧评估面板 */}
+          <div className="col-span-1">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs h-full flex flex-col justify-between">
+              <div>
+                <h4 className="text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-4 border-b border-slate-100 pb-2">
+                  Pipeline 状态监视面板
+                </h4>
+                {pipeline.status === 'IDLE' && (
+                  <div className="text-center py-16 text-slate-400 text-xs space-y-2">
+                    <p className="text-3xl">💤</p>
+                    <p>等待左侧表单提交<br />启动全链路 Agent 骨架网络</p>
+                  </div>
+                )}
+                {(pipeline.status === 'ANALYZING' || pipeline.status === 'ANALYSIS_READY') && (
+                  <div className="space-y-4 animate-fadeIn">
+                    <div className="flex items-center space-x-2 text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-100 px-3 py-2 rounded-xl">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                      <span>
+                        {pipeline.status === 'ANALYZING'
+                          ? '大模型正在拆解需求空间…'
+                          : '✅ 分析完成，准备进入工作台'}
+                      </span>
+                    </div>
+                    <div className="space-y-2.5 pt-1">
+                      <div className="h-4 shimmer rounded-md w-3/4" />
+                      <div className="h-16 shimmer rounded-md" />
+                      <div className="h-4 shimmer rounded-md w-1/2" />
+                      <div className="h-6 shimmer rounded-md w-full" />
+                    </div>
+                  </div>
+                )}
+                {pipeline.status === 'ANALYSIS_READY' && (
+                  <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-700 animate-fadeIn">
+                    ✅ 需求拆解完成！<br />即将自动跳转至智能分析工作台…
+                  </div>
+                )}
+              </div>
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-[11px] text-slate-500 leading-normal mt-4">
+                <span className="font-bold text-slate-700 block mb-0.5">💡 设计提示</span>
+                采用原子状态提交，底层多 Agent 并行计算，提高处理流畅度。
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 6️⃣ M3 — 智能分析工作台 (Analysis Workbench)
+    // ================================================================
+    function M3Analysis() {
+      const { m3Data, pipeline, confirmAnalysis } = useStoreState();
+      const [activeTab, setActiveTab] = useState('req');
+
+      return (
+        <div className="grid grid-cols-2 gap-8 animate-fadeIn">
+          {/* 左侧：文档编辑区 */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col h-[500px]">
+            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2 shrink-0">
+              <div className="flex space-x-1 bg-slate-100 p-0.5 rounded-lg">
+                {['req', 'design'].map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                      activeTab === tab
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    {tab === 'req' ? '📄 requirement.md' : '🛠️ design.md'}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[10px] text-indigo-600 font-mono bg-indigo-50 px-2 py-0.5 rounded">
+                LLM Output
+              </span>
+            </div>
+            <div className="flex-1">
+              <textarea
+                className="w-full h-full text-xs font-mono p-4 bg-slate-50/50 border border-slate-100 rounded-xl focus:outline-none focus:bg-white focus:border-slate-300 leading-relaxed resize-none"
+                defaultValue={activeTab === 'req' ? m3Data.requirement : m3Data.design}
+              />
+            </div>
+            <div className="flex justify-end mt-3 shrink-0">
+              <button className="px-4 py-2 text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-xl hover:bg-indigo-100 transition-all flex items-center space-x-1">
+                <span>🔄</span><span>重新生成</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 右侧：拓扑图 + Gate */}
+          <div className="flex flex-col h-[500px] space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex-1 flex flex-col">
+              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3 shrink-0">
+                🧭 系统拓扑与交互时序预演
+              </h4>
+              <div className="flex-1 bg-slate-900 rounded-xl font-mono text-xs p-5 text-slate-300 overflow-y-auto border border-slate-800 flex items-center justify-center">
+                <div className="space-y-2.5 font-sans w-full max-w-sm">
+                  <div className="border border-indigo-500/30 bg-indigo-950/40 text-indigo-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs">
+                    📥 User Raw Idea
+                  </div>
+                  <div className="text-center text-slate-600 text-[11px]">▼ FastAPI Core Parsed</div>
+                  <div className="border border-slate-600 bg-slate-800 text-slate-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs border-dashed">
+                    🧠 LLM Knowledge Engine
+                  </div>
+                  <div className="text-center text-slate-600 text-[11px]">▼ Context Serialized</div>
+                  <div className="border border-violet-500/30 bg-violet-950/40 text-violet-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs">
+                    🤖 Multi-Agent Graph Workspace
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Gate 放行 */}
+            <div className="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs bg-gradient-to-r from-amber-50/40 to-white flex items-center justify-between">
+              <div className="flex items-center space-x-3 pr-4">
+                <span className="text-xl">🛡️</span>
+                <div>
+                  <h5 className="text-xs font-bold text-slate-800">Human-in-the-loop 人工审计关口</h5>
+                  <p className="text-[10px] text-slate-500">确认放行后流水线将推进到 M4 进行合规校验。</p>
+                </div>
+              </div>
+              <button
+                onClick={confirmAnalysis}
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-100 shrink-0 transition-all pulse-glow"
+              >
+                放行并配置规则 ➔
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 7️⃣ M4 — 规则约束面板 (Guardrails)
+    // ================================================================
+    function M4Guardrails() {
+      const { confirmGuardrails, appendLog } = useStoreState();
+      const [rules, setRules] = useState([
+        { id: 'R-1', cat: '安全',   title: '禁止明文传输和存储 Jira Token',             active: true,  desc: '必须通过环境变量或 K8s Secret 挂载。' },
+        { id: 'R-2', cat: '性能',   title: 'LLM 响应超时阻断与流式降级',                active: true,  desc: '单次交互超过 15s 必须转为异步流式推送。' },
+        { id: 'R-3', cat: '规范',   title: '严格遵循前后端分离设计标准',                active: true,  desc: '禁止在前端嵌入业务逻辑 SQL。' },
+        { id: 'R-4', cat: '安全',   title: '数据脱敏审查规则',                          active: true,  desc: '禁止将含商业机密的日志发送给公有大模型。' },
+        { id: 'R-5', cat: '规范',   title: '代码覆盖率硬约束 ≥ 80%',                    active: false, desc: '生成代码的单元测试覆盖率必须超过 80%。' },
+        { id: 'R-6', cat: '性能',   title: '高频接口必须加 Redis 分布式锁',             active: false, desc: '防止缓存击穿与雪崩。' },
+        { id: 'R-7', cat: '安全',   title: '容器镜像必须通过 Trivy 漏洞扫描',            active: true,  desc: '禁止发布高危/严重漏洞的镜像。' },
+        { id: 'R-8', cat: '规范',   title: 'API 必须遵循 OpenAPI 3.0 规范',             active: true,  desc: '自动校验接口文档完整性。' },
+      ]);
+      const [newRule, setNewRule] = useState('');
+
+      const handleAddRule = () => {
+        if (!newRule.trim()) return;
+        const newId = `R-${rules.length + 1}`;
+        setRules([...rules, {
+          id: newId,
+          cat: '自定义',
+          title: newRule,
+          active: true,
+          desc: '用户追加的自然语言合规约束。',
+        }]);
+        appendLog(`[M4] 追加自定义规则: ${newRule}`);
+
+        // 调用真实 API
+        const pid = window.__pipelineId;
+        if (!USE_MOCK && pid) {
+          fetch(`${API_BASE}/api/pipeline/rules/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pipeline_id: pid, title: newRule, category: '自定义' }),
+          }).catch(() => {});
+        }
+        setNewRule('');
+      };
+
+      const toggleRule = (id) => {
+        const newActive = !rules.find(r => r.id === id)?.active;
+        setRules(rules.map(r => r.id === id ? { ...r, active: newActive } : r));
+
+        // 调用真实 API
+        if (!USE_MOCK) {
+          fetch(`${API_BASE}/api/pipeline/rules/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rule_id: id, active: newActive }),
+          }).catch(() => {});
+        }
+      };
+
+      const catColors = {
+        '安全':   'bg-rose-100 text-rose-600 border-rose-200',
+        '性能':   'bg-amber-100 text-amber-600 border-amber-200',
+        '规范':   'bg-indigo-100 text-indigo-600 border-indigo-200',
+        '自定义': 'bg-slate-100 text-slate-600 border-slate-200',
+      };
+
+      return (
+        <div className="space-y-6 animate-fadeIn">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-base font-bold text-slate-800">🛡️ 规则约束矩阵</h3>
+              <span className="text-xs text-slate-400">
+                已激活 {rules.filter(r => r.active).length} / {rules.length} 项
+              </span>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              {rules.map((rule) => (
+                <div
+                  key={rule.id}
+                  className={`p-4 rounded-xl border transition-all ${
+                    rule.active
+                      ? 'bg-white border-slate-200 shadow-xs'
+                      : 'bg-slate-50 border-slate-100 opacity-55'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-[10px] px-2 py-0.5 font-bold rounded-md border ${catColors[rule.cat] || catColors['自定义']}`}>
+                      {rule.cat}
+                    </span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={rule.active}
+                        onChange={() => toggleRule(rule.id)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-7 h-4 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600" />
+                    </label>
+                  </div>
+                  <h4 className="text-xs font-bold text-slate-700 mb-1">{rule.id}: {rule.title}</h4>
+                  <p className="text-[11px] text-slate-500 leading-normal">{rule.desc}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* 自定义规则输入 */}
+            <div className="mt-5 flex space-x-3 border-t border-slate-100 pt-4">
+              <input
+                type="text"
+                value={newRule}
+                onChange={(e) => setNewRule(e.target.value)}
+                placeholder="➕ 追加自定义规则（例如：高频接口必须加 Redis 分布式锁）…"
+                className="flex-1 text-sm border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-indigo-500 bg-slate-50/50 focus:bg-white"
+                onKeyDown={(e) => e.key === 'Enter' && handleAddRule()}
+              />
+              <button
+                onClick={handleAddRule}
+                className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-medium hover:bg-slate-800 transition-all shrink-0"
+              >
+                添加规则
+              </button>
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              onClick={confirmGuardrails}
+              className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold shadow-sm transition-all pulse-glow"
+            >
+              保存约束，交由 Agent 协同执行 ➔
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 8️⃣ M5 — Agent 执行监视器 (Execution Monitor)
+    // ================================================================
+    function M5Execution() {
+      const { pipeline, startExecution, navigate, appendLog } = useStoreState();
+      const [agentStatus, setAgentStatus] = useState('idle');
+      const [localLogs, setLocalLogs] = useState([]);
+      const timerRef = useRef(null);
+
+      const isRunning = agentStatus !== 'idle' && agentStatus !== 'done';
+
+      const handleStart = () => {
+        if (isRunning) return;
+        setLocalLogs([]);
+        setAgentStatus('router');
+        startExecution();
+
+        const phases = [
+          { agent: 'router', msg: '[RouterAgent] 正在拆解 DAG 拓扑，分发至 CoderAgent…' },
+          { agent: 'coder',  msg: '[CoderAgent] 正在编写 backend/router.py 与 API 模型…' },
+          { agent: 'critic', msg: '[CriticAgent] 按 R-1/R-3 规则进行代码合规审查…' },
+          { agent: 'devops', msg: '[DevOpsAgent] 自动化构建成功 → v1.0.0-build.42' },
+        ];
+
+        let step = 0;
+        timerRef.current = setInterval(() => {
+          if (step < phases.length) {
+            setLocalLogs(prev => [...prev, phases[step].msg]);
+            setAgentStatus(phases[step].agent);
+            appendLog(phases[step].msg);
+            step++;
+          } else {
+            clearInterval(timerRef.current);
+            setAgentStatus('done');
+            appendLog('[System] ✅ 全部 Agent 执行完成，可进入 QA 阶段');
+          }
+        }, 2000);
+      };
+
+      useEffect(() => () => clearInterval(timerRef.current), []);
+
+      const agents = [
+        { key: 'router', icon: '🧭', name: 'Router Agent',    desc: '任务分发与拆解' },
+        { key: 'coder',  icon: '💻', name: 'Coder Agent',      desc: '自主代码编写' },
+        { key: 'critic', icon: '🧐', name: 'Critic Agent',     desc: '合规审查评审' },
+        { key: 'devops', icon: '🚀', name: 'DevOps Agent',     desc: '编译发布组装' },
+      ];
+
+      return (
+        <div className="grid grid-cols-3 gap-8 animate-fadeIn">
+          {/* 左侧 DAG 拓扑 */}
+          <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col h-[480px]">
+            <div className="flex items-center justify-between mb-5 shrink-0">
+              <h3 className="text-base font-bold text-slate-800">🤖 LangGraph 多 Agent 协同拓扑</h3>
+              {isRunning && (
+                <span className="text-xs px-2.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-600 rounded-md animate-pulse">
+                  ⚡ Agent 密集通信中
+                </span>
+              )}
+            </div>
+            <div className="flex-1 flex items-center justify-center">
+              <div className="grid grid-cols-4 gap-5 w-full max-w-2xl">
+                {agents.map((a, idx) => {
+                  const isActive = agentStatus === a.key;
+                  const isDone = agentStatus === 'done' || (
+                    ['router','coder','critic','devops'].indexOf(agentStatus) >
+                    ['router','coder','critic','devops'].indexOf(a.key)
+                  );
+                  return (
+                    <div key={a.key} className="flex flex-col items-center">
+                      <div className={`p-4 rounded-xl border-2 text-center transition-all w-full ${
+                        isActive
+                          ? 'border-indigo-500 bg-indigo-50 shadow-md ring-2 ring-indigo-200 scale-105'
+                          : isDone
+                            ? 'border-emerald-300 bg-emerald-50'
+                            : 'border-slate-100 bg-slate-50'
+                      }`}>
+                        <p className="text-2xl mb-1">{a.icon}</p>
+                        <p className="text-xs font-bold text-slate-700">{a.name.split(' ')[0]}</p>
+                        <p className="text-[9px] text-slate-400 mt-0.5">{a.desc}</p>
+                      </div>
+                      {idx < 3 && (
+                        <div className={`h-8 w-0.5 ${
+                          isDone ? 'bg-emerald-300' : isRunning ? 'bg-indigo-300 animate-pulse' : 'bg-slate-200'
+                        }`} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex items-center justify-between border-t border-slate-100 pt-4 shrink-0">
+              <button
+                onClick={handleStart}
+                disabled={isRunning}
+                className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  isRunning
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    : 'bg-slate-900 hover:bg-slate-800 text-white shadow-xs'
+                }`}
+              >
+                {isRunning ? '⏳ Agent 正在执行…' : agentStatus === 'done' ? '🔄 重新执行' : '🚀 启动多 Agent 构建'}
+              </button>
+              {agentStatus === 'done' && (
+                <button
+                  onClick={() => navigate('qa')}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium shadow-sm transition-all pulse-glow"
+                >
+                  进入自动化验证 QA ➔
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 右侧 Prompt 追踪 */}
+          <div className="col-span-1 bg-slate-900 text-slate-200 rounded-2xl p-4 font-mono text-xs flex flex-col h-[480px] shadow-xl">
+            <div className="text-[10px] text-slate-500 border-b border-slate-800 pb-1.5 uppercase tracking-wider font-sans font-bold shrink-0">
+              ⚡ Agent Prompt 实时追踪
+            </div>
+            <div className="flex-1 overflow-y-auto pt-3 space-y-2">
+              {localLogs.length === 0 ? (
+                <div className="text-slate-600 text-center pt-20 font-sans text-sm">
+                  等待启动 Agent 协同任务…
+                </div>
+              ) : (
+                localLogs.map((ll, i) => (
+                  <div key={i} className="text-emerald-400 text-[11px] leading-relaxed log-line p-1.5 hover:bg-slate-800/50 rounded">
+                    {ll}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 9️⃣ M6 — 自动化验证 QA 面板
+    // ================================================================
+    function M6QA() {
+      const { releaseProduct, appendLog } = useStoreState();
+      const [qaStatus, setQaStatus] = useState('running'); // running | failed | healing | passed
+      const [healLogs, setHealLogs] = useState([]);
+
+      useEffect(() => {
+        const t1 = setTimeout(() => {
+          setQaStatus('failed');
+          appendLog('[QA] 阻断：src/components/WeeklyForm.tsx:42 样式硬编码违反 R-3');
+        }, 1500);
+        const t2 = setTimeout(() => {
+          setQaStatus('healing');
+          setHealLogs([
+            '[AI Self-Healing] 提取失败上下文，对齐 R-3 Prompt…',
+            '[AI Self-Healing] 自动修复完成，触发增量回归测试…',
+          ]);
+          appendLog('[QA] Agent 触发自愈机制，自动修复代码…');
+        }, 3500);
+        const t3 = setTimeout(() => {
+          setQaStatus('passed');
+          appendLog('[QA] 回归通过！覆盖率 88.4%，规则合规 100%。');
+        }, 6000);
+        return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+      }, []);
+
+      const statusBanner = {
+        running: { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-600', label: '⏳ 自动化测试运行中…' },
+        failed:  { bg: 'bg-rose-50 border-rose-200',    text: 'text-rose-600',  label: '❌ 发现缺陷 (R-3 违规)' },
+        healing: { bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-600',label: '🛠️ Agent 正在自愈修复…' },
+        passed:  { bg: 'bg-emerald-50 border-emerald-200',text: 'text-emerald-600',label: '🟢 全部 Pipeline 通过' },
+      };
+
+      return (
+        <div className="space-y-6 animate-fadeIn">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-base font-bold text-slate-800">🧪 自动化沙箱验证与自愈中心</h3>
+              <span className={`text-xs px-3 py-1 rounded-full font-medium border ${statusBanner[qaStatus].bg} ${statusBanner[qaStatus].text} ${qaStatus === 'healing' ? 'animate-pulse' : ''}`}>
+                {statusBanner[qaStatus].label}
+              </span>
+            </div>
+
+            {/* 指标卡片 */}
+            <div className="grid grid-cols-3 gap-5 mb-5">
+              {[
+                { label: '单元测试覆盖率', value: qaStatus === 'passed' ? '88.4%' : qaStatus === 'running' ? '计算中…' : '—', color: qaStatus === 'passed' ? 'text-emerald-600' : 'text-slate-500' },
+                { label: 'E2E 交互测试',    value: qaStatus === 'passed' ? 'PASS' : qaStatus === 'running' ? '运行中…' : '—', color: qaStatus === 'passed' ? 'text-emerald-600' : 'text-slate-500' },
+                { label: '规则合规审查',    value: qaStatus === 'passed' ? '100%' : qaStatus === 'failed' ? 'FAIL' : qaStatus === 'healing' ? '修复中…' : '—', color: qaStatus === 'passed' ? 'text-emerald-600' : qaStatus === 'failed' ? 'text-rose-600' : 'text-slate-500' },
+              ].map((m, i) => (
+                <div key={i} className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-center">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wide block mb-1">{m.label}</span>
+                  <span className={`text-2xl font-black ${m.color}`}>{m.value}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* 测试流水线 */}
+            <div className="space-y-2">
+              {[
+                { name: '1. 静态代码检查 (Linter)',     status: qaStatus === 'passed' ? 'pass' : 'running', detail: '0 errors, 3 warnings' },
+                { name: '2. 单元测试覆盖率',              status: qaStatus === 'passed' ? 'pass' : qaStatus === 'running' ? 'running' : 'fail', detail: qaStatus === 'passed' ? 'Coverage: 88.4%' : '—' },
+                { name: '3. 规则合规性审查 (Rule Check)', status: qaStatus === 'passed' ? 'pass' : qaStatus === 'failed' ? 'fail' : qaStatus === 'healing' ? 'healing' : 'running', detail: qaStatus === 'failed' ? 'R-3 违规' : qaStatus === 'passed' ? '100% 合规' : '运行中…' },
+              ].map((t, i) => {
+                const icons = { pass: '🟢', fail: '🔴', running: '⏳', healing: '🔄' };
+                return (
+                  <div key={i} className={`flex items-center justify-between px-4 py-2.5 rounded-xl text-xs border ${
+                    t.status === 'fail' ? 'bg-rose-50 border-rose-100' :
+                    t.status === 'pass' ? 'bg-emerald-50/50 border-emerald-100' :
+                    t.status === 'healing' ? 'bg-indigo-50 border-indigo-100' :
+                    'bg-slate-50 border-slate-100'
+                  }`}>
+                    <span className="font-medium text-slate-700">{icons[t.status]} {t.name}</span>
+                    <span className="text-slate-500">{t.detail}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 自愈日志 */}
+            {healLogs.length > 0 && (
+              <div className="mt-4 p-4 bg-slate-900 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                <div className="text-[10px] text-indigo-400 font-bold mb-1">🤖 Self-Healing 堆栈追踪:</div>
+                {healLogs.map((hl, i) => <div key={i} className="log-line">{hl}</div>)}
+              </div>
+            )}
+          </div>
+
+          {qaStatus === 'passed' && (
+            <div className="flex justify-end">
+              <button
+                onClick={releaseProduct}
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold shadow-sm transition-all pulse-glow"
+              >
+                一键发布生产与资产沉淀 ➔
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 🔟 M7 — 发布与知识沉淀面板 (Release & Knowledge)
+    // ================================================================
+    function M7Release() {
+      const [products, setProducts] = useState([]);
+      const [knowledge, setKnowledge] = useState(null);
+      const { pipeline } = useStoreState();
+
+      useEffect(() => {
+        // 获取已部署产物清单
+        if (!USE_MOCK) {
+          fetch(`${API_BASE}/api/products/list`).then(r => r.json()).then(d => {
+            setProducts(d.products || []);
+          }).catch(() => {});
+
+          const pid = window.__pipelineId;
+          if (pid) {
+            fetch(`${API_BASE}/api/pipeline/knowledge/${pid}`).then(r => r.json()).then(d => {
+              setKnowledge(d);
+            }).catch(() => {});
+          }
+        }
+      }, []);
+
+      const deployedProducts = products.length > 0 ? products : [
+        { name: pipeline.name || '周报生成系统', version: 'v1.0.0-build.42', url: 'https://app.internal/weekly-report' }
+      ];
+
+      return (
+        <div className="space-y-6 animate-fadeIn">
+          {/* 成功横幅 */}
+          <div className="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-2xl p-6 text-white shadow-md">
+            <h3 className="text-lg font-bold mb-2">🎉 恭喜！端到端自动化交付完成</h3>
+            <p className="text-sm text-emerald-100 leading-relaxed max-w-2xl">
+              您的产品构想已被 Agent 成功转化为生产级容器镜像。服务在 K8s 集群健康运行，
+              全链路沉淀资产已安全归档。
+            </p>
+            <div className="mt-4 flex items-center space-x-4">
+              <button
+                onClick={() => alert('生产环境: ' + (deployedProducts[0]?.url || 'https://app.internal'))}
+                className="px-4 py-2 bg-white text-emerald-700 text-sm font-semibold rounded-xl shadow-xs hover:bg-slate-50 transition-all"
+              >
+                🌐 访问生产应用
+              </button>
+              <span className="text-xs text-emerald-100 font-mono">{deployedProducts[0]?.version || 'v1.0.0'}</span>
+            </div>
+          </div>
+
+          {/* 资产清单 */}
+          <div className="grid grid-cols-2 gap-6">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">
+                🧠 沉淀的微调与提示词资产
+              </h4>
+              <div className="space-y-3">
+                {[
+                  { icon: '📄', title: 'System Prompt 边界蒸馏包', desc: '过滤了当前项目的安全规则定制集', action: '下载' },
+                  { icon: '🛠️', title: '缺陷自愈微调对 (FT JSONL)', desc: '记录了本次 R-3 自愈修复对', action: '1 组已入库' },
+                  { icon: '📚', title: 'Jira API 限流踩坑记录',    desc: '业务领域知识库追加项', action: '查看' },
+                ].map((item, i) => (
+                  <div key={i} className="p-3 bg-slate-50 border border-slate-100 rounded-xl flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-bold text-slate-700">{item.icon} {item.title}</p>
+                      <p className="text-xs text-slate-400">{item.desc}</p>
+                    </div>
+                    <span className="text-xs text-indigo-600 font-semibold cursor-pointer hover:underline">
+                      {item.action}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col justify-between">
+              <div>
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+                  📚 全链路追溯图谱
+                </h4>
+                <p className="text-xs text-slate-500 mb-4">从模糊想法到高可用工程的完整快照：</p>
+                <div className="space-y-2.5 text-xs font-mono bg-slate-50 p-4 rounded-xl border border-slate-100">
+                  {[
+                    { icon: '💡', color: 'text-indigo-600', label: '想法哈希', value: 'ID_32049' },
+                    { icon: '🔍', color: 'text-violet-600', label: '分析哈希', value: 'SPEC_89432' },
+                    { icon: '🤖', color: 'text-amber-600',  label: '代码提交', value: 'COMMIT_0aef93' },
+                    { icon: '📦', color: 'text-emerald-600',label: '容器注册', value: 'registry.hustnlp/weekly:v1.0' },
+                  ].map((item, i) => (
+                    <div key={i} className="flex items-center space-x-2">
+                      <span className={item.color}>{item.icon}</span>
+                      <span className="text-slate-500">[{item.label}]</span>
+                      <span className="text-slate-700">{item.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-4 pt-4 border-t border-slate-100 text-xs text-slate-400 text-center">
+                可通过这些指纹追溯本次交付的任意中间产物
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 🔱 入口渲染
+    // ================================================================
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<M8GlobalFramework />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# AI Factory CLI — 启动包装器
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# 激活后端虚拟环境（如果存在）
+if [ -f "$SCRIPT_DIR/backend/.venv/bin/activate" ]; then
+    source "$SCRIPT_DIR/backend/.venv/bin/activate"
+fi
+
+# 运行 CLI
+PYTHONPATH="$SCRIPT_DIR/ai-factory-runtime:$PYTHONPATH" \
+python3 "$SCRIPT_DIR/ai-factory-runtime/cli.py" "$@"

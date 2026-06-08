@@ -1,0 +1,14 @@
+# Dependencies
+backend/.venv/
+backend/__pycache__/
+backend/*/__pycache__/
+backend/data/
+
+# Environment
+backend/.env
+.env
+
+# IDE
+.vscode/
+.idea/
+*.pyc
