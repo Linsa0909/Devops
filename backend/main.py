@@ -71,6 +71,14 @@ app.add_middleware(
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# 挂载前端工程 (Vite + React)
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/src", StaticFiles(directory=os.path.join(FRONTEND_DIR, "src")), name="frontend-src")
+    assets_dir = os.path.join(FRONTEND_DIR, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
     print(f"📦 本地静态资源已挂载: {STATIC_DIR}")
 
 # ============================================================
@@ -608,7 +616,7 @@ def _to_response(p: Pipeline) -> dict:
 # ============================================================
 # 前端页面服务 (兜底路由 — 必须在所有 API 路由之后)
 # ============================================================
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 INDEX_HTML = os.path.join(FRONTEND_DIR, "index.html")
 
 
