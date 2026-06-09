@@ -194,21 +194,20 @@ async def gate_action(req: GateActionRequest):
     if not success:
         raise HTTPException(400, f"闸门 {req.gate_id} 不在待审批状态")
 
-    # 🔥 Gate1 放行后 → 后台异步启动 Code Execution Loop
+    # 🔥 Gate1 放行后 → 同步执行 Code Execution Loop
     if req.gate_id == "Gate1" and req.action == "approve":
-        pipeline.logs.append("[System] 🔥 Gate1 通过 → 后台启动 Code Execution Loop...")
+        pipeline.logs.append("[System] 🔥 Gate1 通过 → 启动 Code Execution Loop...")
         req_content = next((a.content for a in pipeline.artifacts if a.type.value == "requirement"), pipeline.description)
         design_content = next((a.content for a in pipeline.artifacts if a.type.value == "design"), "")
 
         def _run_codeloop():
+            import traceback as _tb
             try:
                 loop_result = PipelineEngine.run_code_execution_loop(
                     pipeline, pipeline.description, design_content)
                 pipeline.logs.append(f"[System] ✅ CodeLoop 完成: "
                     f"pytest={'PASS' if loop_result.get('passed') else 'FAIL'}, "
                     f"review={loop_result.get('reviews',{}).get('score',0)}/100")
-
-                # 🔥 推送到 Gitea 仓库
                 try:
                     from runtime.git_pusher import GitPushEngine
                     git_engine = GitPushEngine()
@@ -219,16 +218,16 @@ async def gate_action(req: GateActionRequest):
                     if push_result.get("success"):
                         pipeline.logs.append(f"[Git] ✅ 代码已推送: {push_result.get('repo_url','')}")
                     else:
-                        pipeline.logs.append(f"[Git] ⚠️ 推送跳过 (Gitea 未运行)")
+                        pipeline.logs.append(f"[Git] ⚠️ 推送跳过: {push_result.get('error','Gitea未运行')}")
                 except Exception as git_err:
                     pipeline.logs.append(f"[Git] ⚠️ {git_err}")
-
                 engine.auto_advance(pipeline)
                 engine.update_progress(pipeline)
             except Exception as e:
-                pipeline.logs.append(f"[System] ⚠️ CodeLoop 异常: {e}")
+                pipeline.logs.append(f"[System] ❌ CodeLoop 崩溃: {e}")
+                pipeline.logs.append(_tb.format_exc()[-500:])
 
-        threading.Thread(target=_run_codeloop, daemon=True).start()
+        threading.Thread(target=_run_codeloop, daemon=False).start()
 
     # 放行后自动推进
     engine.auto_advance(pipeline)
@@ -616,7 +615,7 @@ def _to_response(p: Pipeline) -> dict:
 # ============================================================
 # 前端页面服务 (兜底路由 — 必须在所有 API 路由之后)
 # ============================================================
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..")
 INDEX_HTML = os.path.join(FRONTEND_DIR, "index.html")
 
 
