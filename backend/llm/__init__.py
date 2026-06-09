@@ -231,13 +231,22 @@ class LLMService:
 
     @staticmethod
     def _safe_parse(raw: str, default: dict) -> dict:
-        """安全解析 JSON"""
+        """安全解析 JSON — 处理 dict/list/string 三种情况"""
+        if raw is None:
+            return default
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, list):
+            return raw[0] if raw and isinstance(raw[0], dict) else default
         # 提取 JSON 块
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0]
         elif "```" in raw:
             raw = raw.split("```")[1].split("```")[0]
         try:
-            return json.loads(raw.strip())
+            parsed = json.loads(raw.strip())
+            if isinstance(parsed, list):
+                return parsed[0] if parsed and isinstance(parsed[0], dict) else default
+            return parsed
         except:
             return default
