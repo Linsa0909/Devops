@@ -13,3 +13,4 @@ backend/.env
 .vscode/
 .idea/
 *.pyc
+index_legacy.html
