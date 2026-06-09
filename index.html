@@ -586,14 +586,14 @@
       var logout = storeState.logout;
       var logEndRef = useRef(null);
 
-      if (!isLoggedIn) {
-        return React.createElement(LoginPage);
-      }
+      // ⚠️ 所有 hooks 必须在条件判断之前调用 (React 规则)
+      useEffect(function() { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+      useEffect(function() { return cleanup; }, []);
 
-      // 自动滚底
-      useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
-      // 清理定时器
-      useEffect(() => cleanup, []);
+      // 登录状态检查 (render 阶段，在 hooks 之后)
+      if (!isLoggedIn) {
+        return React.createElement(LoginPage, null);
+      }
 
       return (
         <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-800 antialiased">
