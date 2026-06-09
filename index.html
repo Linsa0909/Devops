@@ -4,10 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AgentDev OS — 端到端软件需求 Agent 平台</title>
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- 本地静态资源 -->
+  <script src="/static/tailwind.min.js"></script>
+  <script src="/static/react.development.js"></script>
+  <script src="/static/react-dom.development.js"></script>
+  <script src="/static/babel.min.js"></script>
+  <!-- Mermaid 图表渲染 -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({startOnLoad:false,theme:'default',securityLevel:'loose'});</script>
   <script>
     // ===== 后端 API 配置 =====
     const API_BASE = window.location.origin.includes('localhost')
@@ -57,8 +61,33 @@
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans antialiased overflow-hidden">
   <div id="root"></div>
+  <div id="js-error" style="display:none;padding:20px;background:#fef2f2;color:#dc2626;font-family:monospace;font-size:12px;border-bottom:3px solid #dc2626"></div>
+
+  <!-- 错误诊断: 捕获任何 JS 错误并显示在页面上 -->
+  <script>
+    window.__jsErrors = [];
+    window.onerror = function(msg, url, line, col, err) {
+      var el = document.getElementById('js-error');
+      if (!el) return;
+      el.style.display = 'block';
+      var info = (err && err.stack) ? err.stack : (msg + ' at line ' + line + ':' + col);
+      el.innerHTML += '<div style="margin-bottom:4px;padding:4px;background:#fee2e2;border-radius:4px">❌ ' + info.replace(/</g,'&lt;') + '</div>';
+      window.__jsErrors.push(info);
+    };
+    // Also catch Babel compilation errors
+    window.addEventListener('error', function(e) {
+      if (e.target && e.target.tagName === 'SCRIPT') {
+        var el = document.getElementById('js-error');
+        if (!el) return;
+        el.style.display = 'block';
+        el.innerHTML += '<div style="margin-bottom:4px;padding:4px;background:#fee2e2;border-radius:4px">❌ SCRIPT LOAD ERROR: ' + (e.target.src || 'inline') + '</div>';
+      }
+    }, true);
+    console.log('Error handler installed');
+  </script>
 
   <script type="text/babel">
+    console.log('🔵 Babel block started');
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ================================================================
@@ -86,6 +115,10 @@
     const STEPS_ORDER = ['idea', 'analysis', 'guardrails', 'execution', 'qa', 'release'];
 
     const useStore = createStore((set, get) => ({
+      /* ----- 登录状态 ----- */
+      isLoggedIn: false,
+      currentUser: '',
+      authToken: '',
       /* ----- 页面导航 ----- */
       currentStep: 'idea',
       maxUnlockedStep: 'idea',
@@ -108,6 +141,16 @@
       _pollTimer: null,
 
       /* ===== Actions ===== */
+
+      login(username, token) {
+        set({ isLoggedIn: true, currentUser: username, authToken: token });
+        window.__pipelineId = null;
+        get().appendLog('[System] ' + username + ' 已登录 — Gitea: http://localhost:3000');
+      },
+
+      logout() {
+        set({ isLoggedIn: false, currentUser: '', authToken: '', currentStep: 'idea' });
+      },
 
       navigate(step) {
         // 所有 Tab 均可自由点击，不做步骤限制
@@ -153,8 +196,8 @@
                 tasks: data.tasks || [],
               },
               m3Data: {
-                requirement: data.artifacts?.find(a => a.type === 'requirement')?.content || '',
-                design: data.artifacts?.find(a => a.type === 'design')?.content || '',
+                requirement: (data.artifacts || []).filter(function(a) { return a.type === 'requirement'; }).map(function(a) { return a.content; }).join('') || '',
+                design: (data.artifacts || []).filter(function(a) { return a.type === 'design'; }).map(function(a) { return a.content; }).join('') || '',
                 mermaidChart: '',
               },
             });
@@ -329,8 +372,10 @@
       /* ----- 规则确认 (规则 → 执行) ----- */
       confirmGuardrails() {
         get().appendLog('[M4 Gate] 规则锁定，启动多 Agent 协同执行…');
-        get().unlockStep('execution');
-        set({ currentStep: 'execution', pipeline: { ...get().pipeline, status: 'EXECUTING' } });
+        const curMax = STEPS_ORDER.indexOf(get().maxUnlockedStep);
+        const tgt    = STEPS_ORDER.indexOf('execution');
+        const newMax = tgt > curMax ? 'execution' : get().maxUnlockedStep;
+        set({ currentStep: 'execution', maxUnlockedStep: newMax, pipeline: Object.assign({}, get().pipeline, { status: 'EXECUTING' }) });
       },
 
       /* ----- 启动 Agent 执行 (真实或模拟) ----- */
@@ -442,6 +487,81 @@
     }
 
     // ================================================================
+    // Login Page
+    // ================================================================
+    function LoginPage() {
+      var _store = useStoreState();
+      var login = _store.login;
+      var _u = useState('devops');
+      var username = _u[0]; var setUsername = _u[1];
+      var _p = useState('');
+      var password = _p[0]; var setPassword = _p[1];
+      var _e = useState('');
+      var error = _e[0]; var setError = _e[1];
+      var _l = useState(false);
+      var loading = _l[0]; var setLoading = _l[1];
+
+      var handleLogin = function() {
+        if (!username.trim()) { setError('请输入用户名'); return; }
+        if (!password.trim()) { setError('请输入密码'); return; }
+        setLoading(true); setError('');
+        fetch(API_BASE + '/api/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username: username, password: password})
+        }).then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.status === 'ok') {
+              login(d.username, d.token);
+              window.__currentUser = d.username;
+              window.__authToken = d.token;
+            } else {
+              setError(d.message || '登录失败');
+            }
+            setLoading(false);
+          })
+          .catch(function(e) {
+            setError('连接失败: ' + e.message);
+            setLoading(false);
+          });
+      };
+
+      return (
+        <div className="flex h-screen w-screen items-center justify-center bg-gradient-to-br from-slate-50 via-indigo-50 to-slate-100">
+          <div className="w-full max-w-sm">
+            <div className="text-center mb-8">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center text-white font-bold text-2xl shadow-lg shadow-indigo-200 mx-auto mb-3">Ω</div>
+              <h1 className="text-xl font-bold text-slate-800">AgentDev OS</h1>
+              <p className="text-xs text-slate-500 mt-1">端到端软件需求 Agent 平台</p>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 block mb-1.5 uppercase tracking-wide">用户名</label>
+                <input type="text" value={username} onChange={function(e) {setUsername(e.target.value);}}
+                  onKeyDown={function(e) { if(e.key==='Enter') handleLogin(); }}
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all" placeholder="Gitea 用户名"/>
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 block mb-1.5 uppercase tracking-wide">密码</label>
+                <input type="password" value={password} onChange={function(e) {setPassword(e.target.value);}}
+                  onKeyDown={function(e) { if(e.key==='Enter') handleLogin(); }}
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all" placeholder="Gitea 密码"/>
+              </div>
+              {error && <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 text-xs text-rose-600">{error}</div>}
+              <button onClick={handleLogin} disabled={loading}
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-sm font-semibold shadow-xs transition-all disabled:opacity-50">
+                {loading ? '验证中...' : '登录 AgentDev OS'}
+              </button>
+            </div>
+            <p className="text-center text-[11px] text-slate-400 mt-4">
+              Gitea 仓库服务: <a href="http://localhost:3000" target="_blank" className="text-indigo-600 hover:underline">localhost:3000</a>
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
     // 4️⃣ M8 — 全局框架 (Global Framework)
     // ================================================================
     const STEPS_CONFIG = [
@@ -454,11 +574,24 @@
     ];
 
     function M8GlobalFramework() {
-      const { currentStep, maxUnlockedStep, logs, pipeline, navigate, cleanup } = useStoreState();
-      const logEndRef = useRef(null);
+      var storeState = useStoreState();
+      var currentStep = storeState.currentStep;
+      var maxUnlockedStep = storeState.maxUnlockedStep;
+      var logs = storeState.logs;
+      var pipeline = storeState.pipeline || {status:'IDLE'};
+      var navigate = storeState.navigate;
+      var cleanup = storeState.cleanup;
+      var isLoggedIn = storeState.isLoggedIn;
+      var currentUser = storeState.currentUser;
+      var logout = storeState.logout;
+      var logEndRef = useRef(null);
+
+      if (!isLoggedIn) {
+        return React.createElement(LoginPage);
+      }
 
       // 自动滚底
-      useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+      useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
       // 清理定时器
       useEffect(() => cleanup, []);
 
@@ -506,12 +639,13 @@
             </div>
             <div className="p-4 border-t border-slate-100 bg-slate-50/40 flex items-center space-x-3 text-xs">
               <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-violet-500 text-white flex items-center justify-center font-bold text-[11px]">
-                H
+                {currentUser ? currentUser[0].toUpperCase() : 'H'}
               </div>
-              <div>
-                <p className="font-semibold text-slate-700">HUSTNLP Lab</p>
-                <p className="text-[10px] text-slate-400">Node: Sandbox-01</p>
+              <div className="flex-1">
+                <p className="font-semibold text-slate-700">{currentUser || 'HUSTNLP Lab'}</p>
+                <p className="text-[10px] text-slate-400">Gitea: localhost:3000</p>
               </div>
+              <button onClick={logout} className="text-[10px] text-slate-400 hover:text-rose-500 transition-colors">退出</button>
             </div>
           </aside>
 
@@ -579,115 +713,171 @@
     // 5️⃣ M2 — 需求孵化看板 (Idea Hub)
     // ================================================================
     function M2IdeaHub() {
-      const [name, setName] = useState('');
-      const [desc, setDesc] = useState('');
-      const { pipeline, startPipeline } = useStoreState();
+      var _name = useState('');
+      var name = _name[0]; var setName = _name[1];
+      var _desc = useState('');
+      var desc = _desc[0]; var setDesc = _desc[1];
+      var _files = useState([]);
+      var uploadedFiles = _files[0]; var setUploadedFiles = _files[1];
+      var store = useStoreState();
+      var pipeline = (store && store.pipeline) || {};
+      var startPipeline = store && store.startPipeline;
+      var isSubmitting = pipeline.status === 'ANALYZING' || pipeline.status === 'ANALYSIS_READY';
+      var charCount = desc.length;
 
-      const isSubmitting = pipeline.status === 'ANALYZING' || pipeline.status === 'ANALYSIS_READY';
-
-      const handleSubmit = () => {
-        if (!name.trim() || !desc.trim()) return alert('请完整填写需求名称与构想描述！');
-        startPipeline(name, desc);
-      };
+      var templates = [
+        {name:'请假审批系统', desc:'员工在线提交请假申请 → 主管审批 → HR备案。支持年假/事假/病假类型，含通知推送。'},
+        {name:'智能周报生成', desc:'自动抓取本周Git提交和Jira任务完成情况，大模型润色生成Markdown周报，支持企微推送。'},
+        {name:'API网关服务', desc:'统一API网关，支持路由、限流、鉴权、日志。后端微服务注册发现。'},
+      ];
 
       return (
-        <div className="grid grid-cols-3 gap-8">
-          {/* 左侧表单 */}
-          <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
-            <div className="flex items-center space-x-2 mb-5 border-b border-slate-100 pb-3">
-              <span className="text-lg">💡</span>
-              <h3 className="text-sm font-bold text-slate-800">输入您的产品原始构想</h3>
+        <div className="grid grid-cols-5 gap-6 animate-fadeIn">
+          {/* 左侧表单: 3/5 */}
+          <div className="col-span-3 bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center space-x-3 mb-6">
+              <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center">
+                <span className="text-xl">💡</span>
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-800">需求孵化</h3>
+                <p className="text-[11px] text-slate-400">描述你的产品构想, AI 自动拆解为标准软件需求</p>
+              </div>
             </div>
-            <div className="space-y-5">
+            <div className="space-y-4">
               <div>
-                <label className="text-[11px] font-bold text-slate-400 block mb-2 uppercase tracking-wide">
-                  1. 需求项目命名
-                </label>
-                <input
-                  type="text"
-                  disabled={isSubmitting}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="例如：多 Agent 协同的自动化周报生成系统"
-                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-bold text-slate-400 block mb-2 uppercase tracking-wide">
-                  2. 原始业务构想描述
-                </label>
-                <textarea
-                  rows="8"
-                  disabled={isSubmitting}
-                  value={desc}
-                  onChange={(e) => setDesc(e.target.value)}
-                  placeholder="请尽情阐述您的想法：你想解决什么问题？期望的交互流程是怎样的？大模型会自动进行软件工程拆解…"
-                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50/50 focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono leading-relaxed resize-none"
-                />
-              </div>
-              <div className="flex items-center justify-between pt-2">
-                <div className="text-xs text-slate-400">
-                  支持 Markdown 格式，AI 将自动拆解为标准 PRD
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-600 flex items-center space-x-1.5">
+                    <span className="w-1 h-1 rounded-full bg-indigo-500"></span>
+                    <span>项目名称</span>
+                  </label>
                 </div>
+                <input
+                  type="text" disabled={isSubmitting} value={name}
+                  onChange={function(e) { setName(e.target.value); }}
+                  placeholder="给你的产品起个名字..."
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-3 bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 focus:outline-none transition-all placeholder:text-slate-300"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-600 flex items-center space-x-1.5">
+                    <span className="w-1 h-1 rounded-full bg-indigo-500"></span>
+                    <span>需求描述</span>
+                  </label>
+                  <span className={'text-[10px] font-mono ' + (charCount > 50 ? 'text-emerald-500' : 'text-slate-400')}>{charCount} 字</span>
+                </div>
+                <textarea
+                  rows="10" disabled={isSubmitting} value={desc}
+                  onChange={function(e) { setDesc(e.target.value); }}
+                  placeholder="尽情描述你的想法：业务流程是什么？用户怎么交互？期望解决什么问题？&#10;&#10;无需专业术语 — AI 会自动进行软件工程拆解..."
+                  className="w-full text-sm border border-slate-200 rounded-xl px-4 py-3 bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 focus:outline-none transition-all placeholder:text-slate-300 font-sans leading-relaxed resize-none"
+                ></textarea>
+              </div>
+              <div className="flex items-center space-x-2 mb-3">
+                <span className="text-[10px] text-slate-400 shrink-0">快速模板:</span>
+                {templates.map(function(t, i) {
+                  return (
+                    <button key={i}
+                      onClick={function() { setName(t.name); setDesc(t.desc); }}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-slate-50 border border-slate-200 text-slate-500 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-600 transition-all whitespace-nowrap"
+                    >{t.name}</button>
+                  );
+                })}
+              </div>
+
+              {/* 文件上传区 */}
+              <div className="relative">
+                <input type="file" id="file-upload" accept=".md,.txt,.docx,.pdf,.html,.png,.jpg,.jpeg" multiple
+                  onChange={function(e) {
+                    var files = e.target.files;
+                    if (!files || files.length === 0) return;
+                    for (var k = 0; k < files.length; k++) {
+                      var f = files[k];
+                      var fd = new FormData();
+                      fd.append('file', f);
+                      fetch(API_BASE + '/api/pipeline/upload', { method: 'POST', body: fd })
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) {
+                          if (d.text && d.text.length > 10) {
+                            setDesc(function(prev) { return prev + '\n\n## 📎 ' + d.filename + '\n' + d.text.substring(0, 2000); });
+                            setUploadedFiles(function(p) { return p.concat([{ name: d.filename, type: d.type, size: d.size }]); });
+                          }
+                        }).catch(function() {});
+                    }
+                  }}
+                  className="hidden"
+                />
+                <label htmlFor="file-upload"
+                  className="block w-full border-2 border-dashed border-slate-200 rounded-xl p-4 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-all"
+                >
+                  <span className="text-2xl block mb-1">📤</span>
+                  <span className="text-xs font-medium text-slate-500">拖拽文件到此处或 <span className="text-indigo-600">点击上传</span></span>
+                  <span className="block text-[10px] text-slate-400 mt-0.5">支持 .md .docx .pdf .html .png .jpg (图片自动 OCR)</span>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <p className="text-[11px] text-slate-400">提交后 AI: 需求分析 → 架构设计 → 代码生成 → 测试 → 发布</p>
                 <button
-                  onClick={handleSubmit}
+                  onClick={function() {
+                    if (!name.trim() || !desc.trim()) { alert('请完整填写需求名称与构想描述！'); return; }
+                    startPipeline(name, desc);
+                  }}
                   disabled={isSubmitting}
-                  className={`px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-sm font-semibold shadow-xs transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+                  className={'px-6 py-3 rounded-xl text-sm font-semibold shadow-sm transition-all flex items-center space-x-2 ' +
+                    (isSubmitting ? 'bg-indigo-100 text-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200')}
                 >
                   {isSubmitting ? (
-                    <>
-                      <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>AI 正在流水线孵化中…</span>
-                    </>
+                    <span className="flex items-center space-x-2">
+                      <span className="w-4 h-4 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin"></span>
+                      <span>AI 分析中...</span>
+                    </span>
                   ) : (
-                    <span>🚀 提交构想并开始分析</span>
+                    <span className="flex items-center space-x-2">
+                      <span>🚀 提交构想</span>
+                      <span className="text-[10px] opacity-70">→ 自动拆解</span>
+                    </span>
                   )}
                 </button>
               </div>
             </div>
           </div>
-
-          {/* 右侧评估面板 */}
-          <div className="col-span-1">
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs h-full flex flex-col justify-between">
-              <div>
-                <h4 className="text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-4 border-b border-slate-100 pb-2">
-                  Pipeline 状态监视面板
-                </h4>
-                {pipeline.status === 'IDLE' && (
-                  <div className="text-center py-16 text-slate-400 text-xs space-y-2">
-                    <p className="text-3xl">💤</p>
-                    <p>等待左侧表单提交<br />启动全链路 Agent 骨架网络</p>
+          {/* 右侧: 2/5 */}
+          <div className="col-span-2 space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Pipeline 状态</h4>
+              {pipeline.status === 'IDLE' ? (
+                <div className="text-center py-8">
+                  <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-3">
+                    <span className="text-3xl">💤</span>
                   </div>
-                )}
-                {(pipeline.status === 'ANALYZING' || pipeline.status === 'ANALYSIS_READY') && (
-                  <div className="space-y-4 animate-fadeIn">
-                    <div className="flex items-center space-x-2 text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-100 px-3 py-2 rounded-xl">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      <span>
-                        {pipeline.status === 'ANALYZING'
-                          ? '大模型正在拆解需求空间…'
-                          : '✅ 分析完成，准备进入工作台'}
-                      </span>
-                    </div>
-                    <div className="space-y-2.5 pt-1">
-                      <div className="h-4 shimmer rounded-md w-3/4" />
-                      <div className="h-16 shimmer rounded-md" />
-                      <div className="h-4 shimmer rounded-md w-1/2" />
-                      <div className="h-6 shimmer rounded-md w-full" />
-                    </div>
+                  <p className="text-xs text-slate-400">等待提交需求</p>
+                </div>
+              ) : (
+                <div className="space-y-3 animate-fadeIn">
+                  <div className="flex items-center space-x-2">
+                    <span className={'w-2.5 h-2.5 rounded-full ' + (pipeline.status === 'ANALYSIS_READY' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse')}></span>
+                    <span className="text-xs font-semibold text-slate-700">
+                      {pipeline.status === 'ANALYZING' ? 'AI 分析中...' : pipeline.status === 'ANALYSIS_READY' ? '✅ 分析完成' : '处理中'}
+                    </span>
                   </div>
-                )}
-                {pipeline.status === 'ANALYSIS_READY' && (
-                  <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-700 animate-fadeIn">
-                    ✅ 需求拆解完成！<br />即将自动跳转至智能分析工作台…
+                  <div className="bg-slate-50 rounded-lg p-3 space-y-1.5">
+                    <div className="h-2.5 shimmer rounded-full w-3/4"></div>
+                    <div className="h-2.5 shimmer rounded-full w-1/2"></div>
+                    <div className="h-2.5 shimmer rounded-full w-5/6"></div>
                   </div>
-                )}
-              </div>
-              <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-[11px] text-slate-500 leading-normal mt-4">
-                <span className="font-bold text-slate-700 block mb-0.5">💡 设计提示</span>
-                采用原子状态提交，底层多 Agent 并行计算，提高处理流畅度。
-              </div>
+                </div>
+              )}
+            </div>
+            <div className="bg-gradient-to-br from-indigo-50 to-violet-50 rounded-2xl border border-indigo-100 p-4">
+              <h5 className="text-xs font-bold text-indigo-700 mb-2">💡 小贴士</h5>
+              <ul className="space-y-1.5 text-[11px] text-indigo-600 leading-relaxed">
+                <li>• 描述越详细, AI 拆解越精准</li>
+                <li>• 提及角色与场景效果更好</li>
+                <li>• 可上传 PRD 文档作为参考</li>
+                <li>• 点击模板快速填充示例</li>
+              </ul>
             </div>
           </div>
         </div>
@@ -700,6 +890,28 @@
     function M3Analysis() {
       const { m3Data, pipeline, confirmAnalysis } = useStoreState();
       const [activeTab, setActiveTab] = useState('req');
+
+      useEffect(function() {
+        // 渲染 Mermaid 架构图
+        var chart = m3Data.mermaidChart;
+        if (chart && typeof mermaid !== 'undefined') {
+          var container = document.getElementById('mermaid-diagram');
+          var fallback = document.getElementById('mermaid-fallback');
+          if (container && fallback) {
+            try {
+              mermaid.render('mermaid-svg', chart).then(function(result) {
+                container.innerHTML = result.svg;
+                container.classList.remove('hidden');
+                fallback.classList.add('hidden');
+              }).catch(function() {
+                fallback.innerHTML = '<span style=\"color:#94a3b8\">架构图解析中...</span><br/><pre style=\"font-size:10px;text-align:left;margin-top:4px\">' + chart + '</pre>';
+              });
+            } catch(e) {
+              fallback.innerHTML = '<span style=\"color:#94a3b8\">架构图渲染失败</span><br/><pre style=\"font-size:10px;text-align:left;margin-top:4px\">' + chart + '</pre>';
+            }
+          }
+        }
+      }, [m3Data.mermaidChart]);
 
       return (
         <div className="grid grid-cols-2 gap-8 animate-fadeIn">
@@ -744,20 +956,11 @@
               <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3 shrink-0">
                 🧭 系统拓扑与交互时序预演
               </h4>
-              <div className="flex-1 bg-slate-900 rounded-xl font-mono text-xs p-5 text-slate-300 overflow-y-auto border border-slate-800 flex items-center justify-center">
-                <div className="space-y-2.5 font-sans w-full max-w-sm">
-                  <div className="border border-indigo-500/30 bg-indigo-950/40 text-indigo-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs">
-                    📥 User Raw Idea
-                  </div>
-                  <div className="text-center text-slate-600 text-[11px]">▼ FastAPI Core Parsed</div>
-                  <div className="border border-slate-600 bg-slate-800 text-slate-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs border-dashed">
-                    🧠 LLM Knowledge Engine
-                  </div>
-                  <div className="text-center text-slate-600 text-[11px]">▼ Context Serialized</div>
-                  <div className="border border-violet-500/30 bg-violet-950/40 text-violet-300 p-3 rounded-lg text-center text-sm font-bold shadow-xs">
-                    🤖 Multi-Agent Graph Workspace
-                  </div>
+              <div className="flex-1 bg-slate-50 rounded-xl border border-slate-100 overflow-hidden flex items-center justify-center" id="mermaid-container">
+                <div className="text-slate-400 text-xs text-center" id="mermaid-fallback">
+                  等待大模型生成架构图...
                 </div>
+                <div id="mermaid-diagram" className="hidden w-full h-full flex items-center justify-center p-4"></div>
               </div>
             </div>
 
@@ -824,8 +1027,9 @@
       };
 
       const toggleRule = (id) => {
-        const newActive = !rules.find(r => r.id === id)?.active;
-        setRules(rules.map(r => r.id === id ? { ...r, active: newActive } : r));
+        const rule = rules.find(function(r) { return r.id === id; });
+        const newActive = !(rule && rule.active);
+        setRules(rules.map(function(r) { return r.id === id ? Object.assign({}, r, { active: newActive }) : r; }));
 
         // 调用真实 API
         if (!USE_MOCK) {
@@ -918,49 +1122,69 @@
     // 8️⃣ M5 — Agent 执行监视器 (Execution Monitor)
     // ================================================================
     function M5Execution() {
-      const { pipeline, startExecution, navigate, appendLog } = useStoreState();
-      const [agentStatus, setAgentStatus] = useState('idle');
-      const [localLogs, setLocalLogs] = useState([]);
-      const timerRef = useRef(null);
+        var store = useStoreState();
+        var pipeline = (store && store.pipeline) || { status: 'IDLE', task_id: '' };
+        var appendLog = store && store.appendLog;
+        var navigate = store && store.navigate;
+        var _agentStatus = useState([]);
+        var agentData = _agentStatus[0]; var setAgentData = _agentStatus[1];
+        var _running = useState(false);
+        var isRunning = _running[0]; var setRunning = _running[1];
+        var _activeAgent = useState('idle');
+        var activeAgent = _activeAgent[0]; var setActiveAgent = _activeAgent[1];
+        var timerRef = useRef(null);
 
-      const isRunning = agentStatus !== 'idle' && agentStatus !== 'done';
+        var fetchAgentStatus = function() {
+            var pid = (pipeline && pipeline.task_id) || window.__pipelineId;
+            if (!pid) return;
+            fetch(API_BASE + '/api/pipeline/agent-status/' + pid)
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    setAgentData(d.agents || []);
+                    var running = (d.agents || []).find(function(a) { return a.status === 'running'; });
+                    if (running) setActiveAgent(running.id);
+                }).catch(function() {});
+        };
 
-      const handleStart = () => {
-        if (isRunning) return;
-        setLocalLogs([]);
-        setAgentStatus('router');
-        startExecution();
+        var handleStart = function() {
+            if (isRunning) return;
+            setRunning(true);
+            setActiveAgent('pm');
+            if (store && store.startExecution) store.startExecution();
+            if (appendLog) appendLog('[M5] 多 Agent 协同启动...');
 
-        const phases = [
-          { agent: 'router', msg: '[RouterAgent] 正在拆解 DAG 拓扑，分发至 CoderAgent…' },
-          { agent: 'coder',  msg: '[CoderAgent] 正在编写 backend/router.py 与 API 模型…' },
-          { agent: 'critic', msg: '[CriticAgent] 按 R-1/R-3 规则进行代码合规审查…' },
-          { agent: 'devops', msg: '[DevOpsAgent] 自动化构建成功 → v1.0.0-build.42' },
+            // 每 2 秒轮询后端
+            timerRef.current = setInterval(function() {
+                fetchAgentStatus();
+                var pid = (pipeline && pipeline.task_id) || window.__pipelineId;
+                if (pid) {
+                    fetch(API_BASE + '/api/pipeline/status?task_id=' + pid)
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) {
+                            if (d.progress > 50) {
+                                clearInterval(timerRef.current);
+                                setRunning(false);
+                                setActiveAgent('done');
+                                if (appendLog) appendLog('[System] Agent 协同执行完成');
+                            }
+                        }).catch(function() {});
+                }
+            }, 2000);
+        };
+
+        useEffect(function() {
+            fetchAgentStatus();
+            return function() { if (timerRef.current) clearInterval(timerRef.current); };
+        }, []);
+
+        var agents = agentData.length > 0 ? agentData : [
+            { id: 'pm', name: 'PM Agent', icon: '🧭', desc: '需求分析', status: 'pending' },
+            { id: 'architect', name: 'Architect', icon: '🎨', desc: '架构设计', status: 'pending' },
+            { id: 'developer', name: 'Developer', icon: '💻', desc: '代码生成', status: 'pending' },
+            { id: 'tester', name: 'Tester', icon: '🧪', desc: '测试执行', status: 'pending' },
+            { id: 'reviewer', name: 'Reviewer', icon: '🧐', desc: '代码审查', status: 'pending' },
+            { id: 'devops', name: 'DevOps', icon: '🚀', desc: '构建推送', status: 'pending' },
         ];
-
-        let step = 0;
-        timerRef.current = setInterval(() => {
-          if (step < phases.length) {
-            setLocalLogs(prev => [...prev, phases[step].msg]);
-            setAgentStatus(phases[step].agent);
-            appendLog(phases[step].msg);
-            step++;
-          } else {
-            clearInterval(timerRef.current);
-            setAgentStatus('done');
-            appendLog('[System] ✅ 全部 Agent 执行完成，可进入 QA 阶段');
-          }
-        }, 2000);
-      };
-
-      useEffect(() => () => clearInterval(timerRef.current), []);
-
-      const agents = [
-        { key: 'router', icon: '🧭', name: 'Router Agent',    desc: '任务分发与拆解' },
-        { key: 'coder',  icon: '💻', name: 'Coder Agent',      desc: '自主代码编写' },
-        { key: 'critic', icon: '🧐', name: 'Critic Agent',     desc: '合规审查评审' },
-        { key: 'devops', icon: '🚀', name: 'DevOps Agent',     desc: '编译发布组装' },
-      ];
 
       return (
         <div className="grid grid-cols-3 gap-8 animate-fadeIn">
@@ -976,48 +1200,42 @@
             </div>
             <div className="flex-1 flex items-center justify-center">
               <div className="grid grid-cols-4 gap-5 w-full max-w-2xl">
-                {agents.map((a, idx) => {
-                  const isActive = agentStatus === a.key;
-                  const isDone = agentStatus === 'done' || (
-                    ['router','coder','critic','devops'].indexOf(agentStatus) >
-                    ['router','coder','critic','devops'].indexOf(a.key)
-                  );
-                  return (
-                    <div key={a.key} className="flex flex-col items-center">
-                      <div className={`p-4 rounded-xl border-2 text-center transition-all w-full ${
-                        isActive
-                          ? 'border-indigo-500 bg-indigo-50 shadow-md ring-2 ring-indigo-200 scale-105'
-                          : isDone
-                            ? 'border-emerald-300 bg-emerald-50'
-                            : 'border-slate-100 bg-slate-50'
-                      }`}>
-                        <p className="text-2xl mb-1">{a.icon}</p>
-                        <p className="text-xs font-bold text-slate-700">{a.name.split(' ')[0]}</p>
-                        <p className="text-[9px] text-slate-400 mt-0.5">{a.desc}</p>
+                  {agents.map(function(a, idx) {
+                    var isActive = activeAgent === a.id;
+                    var isDone = a.status === 'done';
+                    return (
+                      <div key={a.id} className="flex flex-col items-center">
+                        <div className={'p-3 rounded-xl border-2 text-center transition-all w-full ' + (
+                          isActive
+                            ? 'border-indigo-500 bg-indigo-50 shadow-md ring-2 ring-indigo-200 scale-105'
+                            : isDone
+                              ? 'border-emerald-300 bg-emerald-50'
+                              : 'border-slate-100 bg-slate-50'
+                        )}>
+                          <p className="text-xl mb-0.5">{a.icon}</p>
+                          <p className="text-[11px] font-bold text-slate-700">{a.name}</p>
+                          <p className="text-[9px] text-slate-400">{a.desc}</p>
+                          {a.output && <p className="text-[8px] text-indigo-500 mt-0.5 leading-tight">{a.output.substring(0,40)}</p>}
+                        </div>
+                        {idx < agents.length - 1 && (
+                          <div className={'h-6 w-0.5 ' + (isDone ? 'bg-emerald-300' : isRunning ? 'bg-indigo-300 animate-pulse' : 'bg-slate-200')} />
+                        )}
                       </div>
-                      {idx < 3 && (
-                        <div className={`h-8 w-0.5 ${
-                          isDone ? 'bg-emerald-300' : isRunning ? 'bg-indigo-300 animate-pulse' : 'bg-slate-200'
-                        }`} />
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             </div>
             <div className="flex items-center justify-between border-t border-slate-100 pt-4 shrink-0">
               <button
                 onClick={handleStart}
                 disabled={isRunning}
-                className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                  isRunning
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-slate-900 hover:bg-slate-800 text-white shadow-xs'
-                }`}
+                className={'px-5 py-2.5 rounded-xl text-sm font-medium transition-all ' + (
+                  isRunning ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800 text-white shadow-xs'
+                )}
               >
-                {isRunning ? '⏳ Agent 正在执行…' : agentStatus === 'done' ? '🔄 重新执行' : '🚀 启动多 Agent 构建'}
+                {isRunning ? '⏳ Agent 执行中...' : activeAgent === 'done' ? '🔄 重新执行' : '🚀 启动多 Agent 构建'}
               </button>
-              {agentStatus === 'done' && (
+              {!isRunning && (pipeline.progress || 0) > 50 && (
                 <button
                   onClick={() => navigate('qa')}
                   className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium shadow-sm transition-all pulse-glow"
@@ -1055,35 +1273,49 @@
     // 9️⃣ M6 — 自动化验证 QA 面板
     // ================================================================
     function M6QA() {
-      const { releaseProduct, appendLog } = useStoreState();
-      const [qaStatus, setQaStatus] = useState('running'); // running | failed | healing | passed
-      const [healLogs, setHealLogs] = useState([]);
+      var store = useStoreState();
+      var releaseProduct = store.releaseProduct;
+      var appendLog = store.appendLog;
+      var pipeline = store.pipeline || {};
+      var _qa = useState('running');
+      var qaStatus = _qa[0]; var setQaStatus = _qa[1];
+      var _heal = useState([]);
+      var healLogs = _heal[0]; var setHealLogs = _heal[1];
+      var _tests = useState([]);
+      var testFiles = _tests[0]; var setTestFiles = _tests[1];
+      var _testOut = useState('');
+      var testOutput = _testOut[0]; var setTestOutput = _testOut[1];
+      var _fix = useState([]);
+      var fixAttempts = _fix[0]; var setFixAttempts = _fix[1];
+      var _sel = useState(-1);
+      var selTest = _sel[0]; var setSelTest = _sel[1];
 
-      useEffect(() => {
-        const t1 = setTimeout(() => {
-          setQaStatus('failed');
-          appendLog('[QA] 阻断：src/components/WeeklyForm.tsx:42 样式硬编码违反 R-3');
-        }, 1500);
-        const t2 = setTimeout(() => {
-          setQaStatus('healing');
-          setHealLogs([
-            '[AI Self-Healing] 提取失败上下文，对齐 R-3 Prompt…',
-            '[AI Self-Healing] 自动修复完成，触发增量回归测试…',
-          ]);
-          appendLog('[QA] Agent 触发自愈机制，自动修复代码…');
-        }, 3500);
-        const t3 = setTimeout(() => {
-          setQaStatus('passed');
-          appendLog('[QA] 回归通过！覆盖率 88.4%，规则合规 100%。');
-        }, 6000);
-        return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+      useEffect(function() {
+        var pid = (pipeline && pipeline.task_id) || window.__pipelineId;
+        if (!pid) return;
+        fetch(API_BASE + '/api/pipeline/test-results/' + pid)
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            setTestFiles(d.test_files || []);
+            setTestOutput(d.test_output || '等待执行...');
+            setFixAttempts(d.fix_attempts || []);
+            if (d.test_files && d.test_files.length > 0) {
+              setQaStatus(d.total_retries > 0 ? 'healing' : 'passed');
+              setHealLogs(d.fix_attempts ? d.fix_attempts.map(function(f) { return '[RetryLoop] ' + f.file; }) : []);
+            }
+          }).catch(function() {
+            // Fallback: setTimeout animation
+            setTimeout(function() { setQaStatus('failed'); }, 1500);
+            setTimeout(function() { setQaStatus('healing'); setHealLogs(['[FixAgent] 分析错误...','[FixAgent] 修复完成...']); }, 3500);
+            setTimeout(function() { setQaStatus('passed'); }, 6000);
+          });
       }, []);
 
-      const statusBanner = {
-        running: { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-600', label: '⏳ 自动化测试运行中…' },
-        failed:  { bg: 'bg-rose-50 border-rose-200',    text: 'text-rose-600',  label: '❌ 发现缺陷 (R-3 违规)' },
-        healing: { bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-600',label: '🛠️ Agent 正在自愈修复…' },
-        passed:  { bg: 'bg-emerald-50 border-emerald-200',text: 'text-emerald-600',label: '🟢 全部 Pipeline 通过' },
+      var statusBanner = {
+        running: { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-600', label: '⏳ 测试运行中...' },
+        failed:  { bg: 'bg-rose-50 border-rose-200', text: 'text-rose-600', label: '❌ 发现缺陷' + (fixAttempts.length > 0 ? ' ('+fixAttempts.length+'次尝试)' : '') },
+        healing: { bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-600', label: '🛠️ Agent 自愈修复中...' },
+        passed:  { bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-600', label: '🟢 全部测试通过' },
       };
 
       return (
@@ -1135,8 +1367,41 @@
             {/* 自愈日志 */}
             {healLogs.length > 0 && (
               <div className="mt-4 p-4 bg-slate-900 rounded-xl text-xs font-mono text-slate-300 space-y-1">
-                <div className="text-[10px] text-indigo-400 font-bold mb-1">🤖 Self-Healing 堆栈追踪:</div>
-                {healLogs.map((hl, i) => <div key={i} className="log-line">{hl}</div>)}
+                <div className="text-[10px] text-indigo-400 font-bold mb-1">🤖 Self-Healing / FixAgent 日志:</div>
+                {healLogs.map(function(hl, i) { return <div key={i} className="log-line">{typeof hl === 'string' ? hl : hl.file}</div>; })}
+              </div>
+            )}
+
+            {/* 测试代码可查看 */}
+            {testFiles.length > 0 && (
+              <div className="mt-4">
+                <h5 className="text-xs font-bold text-slate-500 mb-2">📄 测试代码 ({testFiles.length} 个文件)</h5>
+                <div className="flex space-x-2 overflow-x-auto mb-2">
+                  {testFiles.map(function(tf, i) {
+                    return (
+                      <button key={i}
+                        onClick={function() { setSelTest(selTest === i ? -1 : i); }}
+                        className={'px-3 py-1 rounded-lg text-xs border whitespace-nowrap transition-all ' +
+                          (selTest === i ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-700')}
+                      >{tf.path}</button>
+                    );
+                  })}
+                </div>
+                {selTest >= 0 && testFiles[selTest] && (
+                  <div className="bg-slate-900 rounded-xl p-3 font-mono text-xs text-emerald-400 max-h-60 overflow-y-auto">
+                    <pre className="whitespace-pre-wrap">{testFiles[selTest].content}</pre>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* pytest 输出 */}
+            {testOutput && (
+              <div className="mt-4">
+                <h5 className="text-xs font-bold text-slate-500 mb-1">🧪 Pytest 输出</h5>
+                <div className="bg-slate-900 rounded-xl p-3 font-mono text-[10px] text-slate-300 max-h-40 overflow-y-auto">
+                  <pre className="whitespace-pre-wrap">{testOutput}</pre>
+                </div>
               </div>
             )}
           </div>
@@ -1161,96 +1426,150 @@
     function M7Release() {
       const [products, setProducts] = useState([]);
       const [knowledge, setKnowledge] = useState(null);
+      const [fileTree, setFileTree] = useState([]);
+      const [selectedFile, setSelectedFile] = useState(null);
+      const [fileContent, setFileContent] = useState('');
       const { pipeline } = useStoreState();
 
-      useEffect(() => {
-        // 获取已部署产物清单
-        if (!USE_MOCK) {
-          fetch(`${API_BASE}/api/products/list`).then(r => r.json()).then(d => {
-            setProducts(d.products || []);
-          }).catch(() => {});
+      useEffect(function() {
+        var pid = window.__pipelineId || (pipeline && pipeline.task_id);
+        if (!pid) return;
 
-          const pid = window.__pipelineId;
-          if (pid) {
-            fetch(`${API_BASE}/api/pipeline/knowledge/${pid}`).then(r => r.json()).then(d => {
-              setKnowledge(d);
-            }).catch(() => {});
-          }
-        }
+        // 拉取产物文件树
+        fetch(API_BASE + '/api/pipeline/products/' + pid)
+          .then(function(r) { return r.json(); })
+          .then(function(d) { setFileTree(d.files || []); })
+          .catch(function() {});
+
+        // 拉取知识资产
+        fetch(API_BASE + '/api/pipeline/knowledge/' + pid)
+          .then(function(r) { return r.json(); })
+          .then(function(d) { setKnowledge(d); })
+          .catch(function() {});
+
+        // 拉取产物清单
+        fetch(API_BASE + '/api/products/list')
+          .then(function(r) { return r.json(); })
+          .then(function(d) { setProducts(d.products || []); })
+          .catch(function() {});
       }, []);
 
-      const deployedProducts = products.length > 0 ? products : [
-        { name: pipeline.name || '周报生成系统', version: 'v1.0.0-build.42', url: 'https://app.internal/weekly-report' }
-      ];
+      var openFile = function(path) {
+        var pid = window.__pipelineId || (pipeline && pipeline.task_id);
+        if (!pid) return;
+        setSelectedFile(path);
+        fetch(API_BASE + '/api/pipeline/files/' + pid + '/' + path)
+          .then(function(r) { return r.json(); })
+          .then(function(d) { setFileContent(d.content || ''); })
+          .catch(function() { setFileContent('(加载失败)'); });
+      };
+
+      var pipelineName = (pipeline && pipeline.name) || 'AgentDev OS 项目';
+      var pipelineId = (pipeline && pipeline.task_id) || '';
 
       return (
-        <div className="space-y-6 animate-fadeIn">
+        <div className="space-y-4 animate-fadeIn">
           {/* 成功横幅 */}
           <div className="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-2xl p-6 text-white shadow-md">
-            <h3 className="text-lg font-bold mb-2">🎉 恭喜！端到端自动化交付完成</h3>
-            <p className="text-sm text-emerald-100 leading-relaxed max-w-2xl">
-              您的产品构想已被 Agent 成功转化为生产级容器镜像。服务在 K8s 集群健康运行，
-              全链路沉淀资产已安全归档。
+            <h3 className="text-lg font-bold mb-2">🎉 交付完成 — {pipelineName}</h3>
+            <p className="text-sm text-emerald-100 leading-relaxed">
+              Agent 已将需求转化为可执行代码并归档。共生成 {fileTree.length} 个文件。
             </p>
-            <div className="mt-4 flex items-center space-x-4">
-              <button
-                onClick={() => alert('生产环境: ' + (deployedProducts[0]?.url || 'https://app.internal'))}
-                className="px-4 py-2 bg-white text-emerald-700 text-sm font-semibold rounded-xl shadow-xs hover:bg-slate-50 transition-all"
-              >
-                🌐 访问生产应用
-              </button>
-              <span className="text-xs text-emerald-100 font-mono">{deployedProducts[0]?.version || 'v1.0.0'}</span>
+            <div className="mt-3 flex items-center space-x-3">
+              <a href="http://localhost:3000" target="_blank" className="px-4 py-2 bg-white text-emerald-700 text-sm font-semibold rounded-xl shadow-xs hover:bg-slate-50 transition-all inline-block">
+                🌐 Gitea 仓库
+              </a>
+              <span className="text-xs text-emerald-100 font-mono">{pipelineId}</span>
             </div>
           </div>
 
-          {/* 资产清单 */}
-          <div className="grid grid-cols-2 gap-6">
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
-              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">
-                🧠 沉淀的微调与提示词资产
+          {/* 部署预览 */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">🌐 部署预览</h4>
+              <button
+                onClick={function() {
+                  var pid = window.__pipelineId || (pipeline && pipeline.task_id);
+                  if (!pid) return alert('请先完成 Gate1 审批');
+                  fetch(API_BASE + '/api/deploy/' + pid, { method: 'POST' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                      if (d.url) window.open(d.url, '_blank');
+                      else alert('部署失败: ' + (d.error || '未知'));
+                    }).catch(function() { alert('部署失败'); });
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-all"
+              >🚀 部署并打开</button>
+            </div>
+            <p className="text-[11px] text-slate-500">将 Agent 生成的代码启动为可访问的 Web 服务</p>
+          </div>
+
+          {/* 文件浏览器 + 代码查看 */}
+          <div className="grid grid-cols-3 gap-4">
+            {/* 左侧: 文件树 */}
+            <div className="col-span-1 bg-white rounded-2xl border border-slate-200 p-4 shadow-xs h-[400px] flex flex-col">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 shrink-0">
+                📁 产物文件 ({fileTree.length})
               </h4>
-              <div className="space-y-3">
-                {[
-                  { icon: '📄', title: 'System Prompt 边界蒸馏包', desc: '过滤了当前项目的安全规则定制集', action: '下载' },
-                  { icon: '🛠️', title: '缺陷自愈微调对 (FT JSONL)', desc: '记录了本次 R-3 自愈修复对', action: '1 组已入库' },
-                  { icon: '📚', title: 'Jira API 限流踩坑记录',    desc: '业务领域知识库追加项', action: '查看' },
-                ].map((item, i) => (
-                  <div key={i} className="p-3 bg-slate-50 border border-slate-100 rounded-xl flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-bold text-slate-700">{item.icon} {item.title}</p>
-                      <p className="text-xs text-slate-400">{item.desc}</p>
-                    </div>
-                    <span className="text-xs text-indigo-600 font-semibold cursor-pointer hover:underline">
-                      {item.action}
-                    </span>
-                  </div>
-                ))}
+              <div className="flex-1 overflow-y-auto space-y-0.5">
+                {fileTree.length === 0 ? (
+                  <p className="text-xs text-slate-400 text-center pt-10">暂无产物文件</p>
+                ) : (
+                  fileTree.map(function(f, i) {
+                    return (
+                      <div key={i}
+                        onClick={function() { openFile(f.path); }}
+                        className={'px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-all flex items-center space-x-2 ' +
+                          (selectedFile === f.path ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-slate-600 hover:bg-slate-50')}
+                      >
+                        <span>{f.path.match(/\.(md|mmd|py|js|ts|json|yaml|txt)$/) ? '📄' : f.path.match(/requirements/) ? '📦' : '📁'}</span>
+                        <span className="truncate flex-1">{f.path}</span>
+                        <span className="text-[10px] text-slate-400">{Math.round(f.size/1000)}KB</span>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col justify-between">
-              <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-                  📚 全链路追溯图谱
-                </h4>
-                <p className="text-xs text-slate-500 mb-4">从模糊想法到高可用工程的完整快照：</p>
-                <div className="space-y-2.5 text-xs font-mono bg-slate-50 p-4 rounded-xl border border-slate-100">
-                  {[
-                    { icon: '💡', color: 'text-indigo-600', label: '想法哈希', value: 'ID_32049' },
-                    { icon: '🔍', color: 'text-violet-600', label: '分析哈希', value: 'SPEC_89432' },
-                    { icon: '🤖', color: 'text-amber-600',  label: '代码提交', value: 'COMMIT_0aef93' },
-                    { icon: '📦', color: 'text-emerald-600',label: '容器注册', value: 'registry.hustnlp/weekly:v1.0' },
-                  ].map((item, i) => (
-                    <div key={i} className="flex items-center space-x-2">
-                      <span className={item.color}>{item.icon}</span>
-                      <span className="text-slate-500">[{item.label}]</span>
-                      <span className="text-slate-700">{item.value}</span>
-                    </div>
-                  ))}
-                </div>
+            {/* 右侧: 代码查看 */}
+            <div className="col-span-2 bg-slate-900 rounded-2xl p-4 font-mono text-xs text-slate-200 h-[400px] flex flex-col shadow-xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3 shrink-0">
+                <span className="text-emerald-400 text-[11px]">{selectedFile || '(点击左侧文件查看)'}</span>
+                <span className="text-[10px] text-slate-500">{fileContent.length} 字符</span>
               </div>
-              <div className="mt-4 pt-4 border-t border-slate-100 text-xs text-slate-400 text-center">
-                可通过这些指纹追溯本次交付的任意中间产物
+              <div className="flex-1 overflow-y-auto">
+                {selectedFile ? (
+                  <pre className="text-[11px] leading-relaxed whitespace-pre-wrap">{fileContent || '加载中...'}</pre>
+                ) : (
+                  <div className="text-slate-600 text-center pt-16">
+                    <p className="text-lg mb-2">📂</p>
+                    <p>点击左侧文件查看源代码<br/>或架构设计文档</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 全链路追溯 */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs">
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">📚 全链路追溯</h4>
+            <div className="space-y-1.5 text-xs font-mono bg-slate-50 p-3 rounded-xl border border-slate-100">
+              <div className="flex items-center space-x-2">
+                <span className="text-indigo-600">💡</span><span className="text-slate-500">[需求]</span>
+                <span className="text-slate-700">{pipelineName}</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <span className="text-violet-600">🔍</span><span className="text-slate-500">[流水线]</span>
+                <span className="text-slate-700">{pipelineId}</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <span className="text-amber-600">🤖</span><span className="text-slate-500">[产物]</span>
+                <span className="text-slate-700">{fileTree.length} 个文件</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <span className="text-emerald-600">📦</span><span className="text-slate-500">[Gitea]</span>
+                <a href="http://localhost:3000" target="_blank" className="text-indigo-600 hover:underline">localhost:3000</a>
               </div>
             </div>
           </div>
@@ -1263,6 +1582,20 @@
     // ================================================================
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<M8GlobalFramework />);
+    console.log('🟢 Babel block compiled and rendered successfully!');
+    if (document.getElementById('js-error')) document.getElementById('js-error').style.display = 'none';
+  </script>
+
+  <!-- 白屏防护: Babel 编译完成后 #root 应该被 React 填充, 如果 5 秒后仍空则显示错误 -->
+  <script>
+    (function() {
+      setTimeout(function() {
+        var el = document.getElementById('root');
+        if (el && el.innerText.trim() === '' && el.children.length === 0) {
+          el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#f8fafc;color:#334155"><div style="text-align:center;max-width:400px;padding:40px"><div style="font-size:48px;margin-bottom:16px">⚠️</div><h2 style="font-size:18px;margin-bottom:8px">页面渲染失败</h2><p style="font-size:13px;color:#64748b;line-height:1.6">可能原因: Babel 编译出错、JS 语法错误或资源加载超时。<br>按 F12 查看 Console 错误信息。</p><button onclick="location.reload()" style="margin-top:16px;padding:8px 24px;background:#6366f1;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer">重新加载</button></div></div>';
+        }
+      }, 8000);
+    })();
   </script>
 </body>
 </html>

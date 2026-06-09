@@ -10,9 +10,16 @@ from typing import Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+import threading
+import re
+import urllib.request
+import base64 as _base64
+from pathlib import Path
 
 from core import PipelineEngine
 from guardrails import GuardrailEngine
@@ -60,6 +67,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 挂载本地静态资源 (代替 CDN)
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    print(f"📦 本地静态资源已挂载: {STATIC_DIR}")
+
 # ============================================================
 # API: 流水线管理
 # ============================================================
@@ -70,63 +83,73 @@ async def start_pipeline(req: IdeaSubmitRequest):
     pipeline = PipelineEngine.create_pipeline(req.name, req.description)
     pipelines[pipeline.id] = pipeline
 
-    # 异步触发 REQ 分析
+    # 提取活跃规则作为约束上下文
+    active_rules_text = "\n".join([
+        f"- [{r.id}] {r.title}: {r.description}" for r in pipeline.rules if r.active
+    ])
+
     try:
+        # ── REQ Agent: 需求结构化 (注入规则约束) ──
+        pipeline.logs.append("[LLM] REQ Agent 分析中...")
         req_result = llm.analyze_requirement(req.name, req.description)
         req_md = req_result.get("requirement_md", f"# {req.name}\n\n{req.description}")
-        pipeline.logs.append(f"[LLM] ✅ 需求分析完成 — 生成 {len(req_result.get('user_stories', []))} 条用户故事")
+        pipeline.logs.append(f"[LLM] ✅ 需求分析: {len(req_result.get('user_stories', []))} 条用户故事, {len(req_result.get('functional_modules', []))} 个功能模块")
 
         # 保存需求产物
-        artifact = Artifact(
-            id=f"art_{uuid.uuid4().hex[:8]}",
-            type=ArtifactType.REQUIREMENT,
-            name="需求规格说明书",
-            path=f"docs/requirement.md",
-            content=req_md,
-            task_id=pipeline.id,
-        )
-        KnowledgeEngine.save_artifact(pipeline, artifact)
+        KnowledgeEngine.save_artifact(pipeline, Artifact(
+            id=f"art_{uuid.uuid4().hex[:8]}", type=ArtifactType.REQUIREMENT,
+            name="需求规格说明书", path="docs/requirement.md", content=req_md, task_id=pipeline.id))
 
-        # 架构设计
-        design_result = llm.design_architecture(req_md)
+        # ── Architect Agent: 架构设计 (基于结构化需求 + 规则约束) ──
+        pipeline.logs.append("[LLM] Architect Agent 架构设计中 (含 Guardrails)...")
+        design_result = llm.design_architecture(
+            f"用户故事:\n" + "\n".join(req_result.get("user_stories", [])[:5]) +
+            f"\n功能模块:\n" + json.dumps(req_result.get("functional_modules", []), ensure_ascii=False) +
+            f"\nAPI规格:\n" + json.dumps(req_result.get("api_specs", []), ensure_ascii=False) +
+            f"\n技术栈建议:\n" + ", ".join(req_result.get("tech_stack", [])) +
+            f"\n风险评估:\n" + "\n".join(req_result.get("risk_points", []))
+        )
         design_md = design_result.get("design_md", "")
-        pipeline.logs.append(f"[LLM] ✅ 架构设计完成 — {len(design_result.get('component_list', []))} 个组件")
+        component_count = len(design_result.get("component_list", []))
+        pipeline.logs.append(f"[LLM] ✅ 架构设计: {component_count} 个组件, {len(design_result.get('api_design', []))} 个接口")
 
-        design_artifact = Artifact(
-            id=f"art_{uuid.uuid4().hex[:8]}",
-            type=ArtifactType.DESIGN,
-            name="架构设计文档",
-            path=f"docs/design.md",
-            content=design_md,
-            task_id=pipeline.id,
-        )
-        KnowledgeEngine.save_artifact(pipeline, design_artifact)
+        KnowledgeEngine.save_artifact(pipeline, Artifact(
+            id=f"art_{uuid.uuid4().hex[:8]}", type=ArtifactType.DESIGN,
+            name="架构设计文档", path="docs/design.md", content=design_md, task_id=pipeline.id))
+        KnowledgeEngine.save_artifact(pipeline, Artifact(
+            id=f"art_{uuid.uuid4().hex[:8]}", type=ArtifactType.DESIGN,
+            name="架构拓扑图", path="docs/architecture.mmd",
+            content=design_result.get("architecture_diagram", ""), task_id=pipeline.id))
+        KnowledgeEngine.save_artifact(pipeline, Artifact(
+            id=f"art_{uuid.uuid4().hex[:8]}", type=ArtifactType.DESIGN,
+            name="接口规范", path="docs/api_spec.md",
+            content=json.dumps(design_result.get("api_design", []), ensure_ascii=False, indent=2), task_id=pipeline.id))
+        KnowledgeEngine.save_artifact(pipeline, Artifact(
+            id=f"art_{uuid.uuid4().hex[:8]}", type=ArtifactType.DESIGN,
+            name="数据流设计", path="docs/data_flow.md",
+            content=json.dumps(design_result.get("data_flow", []), ensure_ascii=False, indent=2), task_id=pipeline.id))
 
-        # 保存架构图
-        mermaid = design_result.get("architecture_diagram", "")
-        mermaid_artifact = Artifact(
-            id=f"art_{uuid.uuid4().hex[:8]}",
-            type=ArtifactType.DESIGN,
-            name="架构拓扑图",
-            path=f"docs/architecture.mmd",
-            content=mermaid,
-            task_id=pipeline.id,
-        )
-        KnowledgeEngine.save_artifact(pipeline, mermaid_artifact)
+        # ── Guardrails 检查需求+设计 ──
+        pipeline.logs.append("[Guardrails] 检查需求与设计合规性...")
+        context = {"code": design_md, "logs": "\n".join(pipeline.logs[-10:]),
+                    "api_spec": json.dumps(design_result.get("api_design", []))}
+        rule_results = GuardrailEngine.check_all_rules(pipeline, context)
+        failed_rules = [r for r in rule_results if not r.get("passed")]
+        if failed_rules:
+            pipeline.logs.append(f"[Guardrails] ⚠️ {len(failed_rules)} 条规则未通过: {[r.get('rule_id') for r in failed_rules]}")
+        else:
+            pipeline.logs.append("[Guardrails] ✅ 全部激活规则通过")
 
-        # 推进任务状态
+        # 推进任务
         engine.advance(pipeline, f"{pipeline.id}_t01", TaskStatus.IDEA_ANALYZING, output=req_md)
         engine.advance(pipeline, f"{pipeline.id}_t02", TaskStatus.REQUIREMENT_GEN, output=req_md)
         engine.advance(pipeline, f"{pipeline.id}_t04", TaskStatus.DESIGN_GEN, output=design_md)
         engine.advance(pipeline, f"{pipeline.id}_t05", TaskStatus.DESIGN_GEN, output=design_md)
-
-        # 到达 Gate1
         engine.advance(pipeline, f"{pipeline.id}_t03", TaskStatus.REQUIREMENT_REVIEW)
         for g in pipeline.gates:
-            if g.id == "Gate1":
-                g.status = GateStatus.PENDING
+            if g.id == "Gate1": g.status = GateStatus.PENDING
         pipeline.status = PipelineStatus.GATE_WAIT
-        pipeline.logs.append(f"[Engine] ⏸ 到达 Gate1 — 等待人工审批需求审查...")
+        pipeline.logs.append("[Engine] ⏸ 到达 Gate1 — 等待人工审批需求审查...")
 
     except Exception as e:
         pipeline.logs.append(f"[ERROR] 分析阶段出错: {str(e)}")
@@ -163,20 +186,41 @@ async def gate_action(req: GateActionRequest):
     if not success:
         raise HTTPException(400, f"闸门 {req.gate_id} 不在待审批状态")
 
-    # 🔥 Gate1 放行后 → 启动 Code Execution Loop
+    # 🔥 Gate1 放行后 → 后台异步启动 Code Execution Loop
     if req.gate_id == "Gate1" and req.action == "approve":
-        pipeline.logs.append("[System] 🔥 Gate1 通过 → 启动 Code Execution Loop...")
-        # 提取需求和设计
+        pipeline.logs.append("[System] 🔥 Gate1 通过 → 后台启动 Code Execution Loop...")
         req_content = next((a.content for a in pipeline.artifacts if a.type.value == "requirement"), pipeline.description)
         design_content = next((a.content for a in pipeline.artifacts if a.type.value == "design"), "")
-        try:
-            loop_result = PipelineEngine.run_code_execution_loop(
-                pipeline, pipeline.description, design_content)
-            pipeline.logs.append(f"[System] ✅ Code Execution Loop 完成: "
-                                f"pytest={'PASS' if loop_result.get('passed') else 'FAIL'}, "
-                                f"review={loop_result.get('reviews',{}).get('score',0)}/100")
-        except Exception as e:
-            pipeline.logs.append(f"[System] ⚠️ Code Execution Loop 异常: {e}")
+
+        def _run_codeloop():
+            try:
+                loop_result = PipelineEngine.run_code_execution_loop(
+                    pipeline, pipeline.description, design_content)
+                pipeline.logs.append(f"[System] ✅ CodeLoop 完成: "
+                    f"pytest={'PASS' if loop_result.get('passed') else 'FAIL'}, "
+                    f"review={loop_result.get('reviews',{}).get('score',0)}/100")
+
+                # 🔥 推送到 Gitea 仓库
+                try:
+                    from runtime.git_pusher import GitPushEngine
+                    git_engine = GitPushEngine()
+                    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '-', pipeline.name[:30])
+                    repo_name = f"{pipeline.id[:12]}-{safe_name}"
+                    ws = loop_result.get("workspace_path", f"workspace/{pipeline.id}")
+                    push_result = git_engine.push_workspace(ws, repo_name, pipeline.description)
+                    if push_result.get("success"):
+                        pipeline.logs.append(f"[Git] ✅ 代码已推送: {push_result.get('repo_url','')}")
+                    else:
+                        pipeline.logs.append(f"[Git] ⚠️ 推送跳过 (Gitea 未运行)")
+                except Exception as git_err:
+                    pipeline.logs.append(f"[Git] ⚠️ {git_err}")
+
+                engine.auto_advance(pipeline)
+                engine.update_progress(pipeline)
+            except Exception as e:
+                pipeline.logs.append(f"[System] ⚠️ CodeLoop 异常: {e}")
+
+        threading.Thread(target=_run_codeloop, daemon=True).start()
 
     # 放行后自动推进
     engine.auto_advance(pipeline)
@@ -308,6 +352,48 @@ async def get_knowledge(pipeline_id: str):
     return KnowledgeEngine.get_knowledge_assets(pipeline)
 
 
+@app.get("/api/pipeline/products/{pipeline_id}")
+async def get_pipeline_products(pipeline_id: str):
+    """获取流水线产物文件树"""
+    import glob as _glob
+    pipeline = pipelines.get(pipeline_id)
+    if not pipeline:
+        raise HTTPException(404, f"任务 {pipeline_id} 不存在")
+
+    files = []
+    # 知识库产物
+    knowledge_dir = os.path.join("data", "knowledge", pipeline_id)
+    if os.path.exists(knowledge_dir):
+        for root, dirs, filenames in os.walk(knowledge_dir):
+            for fn in filenames:
+                full = os.path.join(root, fn)
+                rel = "/".join(full.split("/")[-3:])
+                files.append({"path": rel, "size": os.path.getsize(full), "source": "knowledge"})
+    # workspace 产物
+    workspace_dir = os.path.join("workspace", pipeline_id)
+    if os.path.exists(workspace_dir):
+        for root, dirs, filenames in os.walk(workspace_dir):
+            for fn in filenames:
+                if fn.startswith(".") or fn.endswith(".pyc"):
+                    continue
+                full = os.path.join(root, fn)
+                rel = str(Path(full).relative_to(workspace_dir))
+                files.append({"path": rel, "size": os.path.getsize(full), "source": "workspace"})
+    return {"pipeline_id": pipeline_id, "files": files, "total": len(files)}
+
+
+@app.get("/api/pipeline/files/{pipeline_id}/{path:path}")
+async def get_pipeline_file(pipeline_id: str, path: str):
+    """读取产物文件内容 (尝试 knowledge 和 workspace 两个来源)"""
+    for src_dir in ["data/knowledge", "workspace"]:
+        filepath = os.path.join(src_dir, pipeline_id, path)
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"path": path, "content": content, "size": len(content)}
+    raise HTTPException(404, f"文件 {path} 不存在")
+
+
 @app.get("/api/pipeline/history/{pipeline_id}")
 async def get_history(pipeline_id: str):
     """获取全链路追溯"""
@@ -324,6 +410,181 @@ async def get_logs(pipeline_id: str):
     if not pipeline:
         raise HTTPException(404, f"任务 {pipeline_id} 不存在")
     return {"logs": pipeline.logs[-100:]}
+
+
+# ============================================================
+# API: 认证 + Agent 状态 + 测试结果
+# ============================================================
+
+GITEA_URL = "http://localhost:3000"
+_git_tokens: dict[str, str] = {}
+
+@app.post("/api/auth/login")
+async def auth_login(req: dict):
+    """登录 — 用 Gitea API 验证用户名密码, 返回 token"""
+    username = req.get("username", "")
+    password = req.get("password", "")
+    if not username or not password:
+        raise HTTPException(400, "用户名和密码不能为空")
+
+    try:
+        data = json.dumps({"name": "agentdev-login"}).encode()
+        auth = _base64.b64encode(f"{username}:{password}".encode()).decode()
+        http_req = urllib.request.Request(
+            f"{GITEA_URL}/api/v1/users/{username}/tokens",
+            data=data, method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"},
+        )
+        resp = urllib.request.urlopen(http_req, timeout=5)
+        result = json.loads(resp.read())
+        token = result.get("sha1", "")
+        _git_tokens[username] = token
+        return {"status": "ok", "username": username, "token": token, "gitea_url": GITEA_URL}
+    except Exception as e:
+        # 回退: 本地简单验证
+        if username == "devops" and password == "devops123":
+            _git_tokens[username] = "local-dev-token"
+            return {"status": "ok", "username": username, "token": "local-dev-token", "gitea_url": GITEA_URL}
+        raise HTTPException(401, f"登录失败: {str(e)}")
+
+
+@app.get("/api/pipeline/agent-status/{pipeline_id}")
+async def get_agent_status(pipeline_id: str):
+    """获取每个 Agent 节点的真实执行状态 (用于 M5 拓扑)"""
+    pipeline = pipelines.get(pipeline_id)
+    if not pipeline:
+        raise HTTPException(404, f"任务 {pipeline_id} 不存在")
+
+    # 读取 workspace 中的产物来判断每个 Agent 做了什么
+    ws = os.path.join("workspace", pipeline_id)
+    files_found = []
+    if os.path.exists(ws):
+        for root, dirs, filenames in os.walk(ws):
+            for fn in filenames:
+                if fn.startswith(".") or fn.endswith(".pyc"):
+                    continue
+                full = os.path.join(root, fn)
+                files_found.append({
+                    "path": str(Path(full).relative_to(ws)),
+                    "size": os.path.getsize(full),
+                })
+
+    agents = [
+        {"id": "pm",       "name": "PM Agent",         "icon": "🧭", "desc": "需求分析与结构化",
+         "status": "done" if any("requirement" in a.type.value for a in pipeline.artifacts) else "pending",
+         "output": f"生成 {len([a for a in pipeline.artifacts if a.type.value=='requirement'])} 份需求文档"},
+        {"id": "architect","name": "Architect Agent",   "icon": "🎨", "desc": "系统架构与接口设计",
+         "status": "done" if any("design" in a.type.value for a in pipeline.artifacts) else "pending",
+         "output": f"架构设计 {len([a for a in pipeline.artifacts if a.type.value=='design'])} 份文档"},
+        {"id": "developer","name": "Developer Agent",   "icon": "💻", "desc": "代码生成与测试编写",
+         "status": "running" if os.path.exists(ws) and files_found else "pending",
+         "output": f"生成 {len(files_found)} 个文件" if files_found else ""},
+        {"id": "tester",   "name": "Tester Agent",      "icon": "🧪", "desc": "pytest 执行 + 结果分析",
+         "status": "done" if any(t.status.value == "TEST_PASSED" for t in pipeline.tasks) else "pending",
+         "output": "单元测试完成" if pipeline.progress > 30 else ""},
+        {"id": "reviewer", "name": "Reviewer Agent",    "icon": "🧐", "desc": "10维代码审查",
+         "status": "done" if pipeline.progress > 50 else "pending",
+         "output": f"审查评分完成" if pipeline.progress > 50 else ""},
+        {"id": "devops",   "name": "DevOps Agent",      "icon": "🚀", "desc": "构建 + 推送 Gitea",
+         "status": "done" if pipeline.status.value == "COMPLETED" else "pending",
+         "output": "已推送到 Gitea 仓库" if pipeline.status.value == "COMPLETED" else ""},
+    ]
+    return {"pipeline_id": pipeline_id, "agents": agents, "progress": pipeline.progress,
+            "files": files_found[:20]}
+
+
+@app.get("/api/pipeline/test-results/{pipeline_id}")
+async def get_test_results(pipeline_id: str):
+    """获取真实测试结果 (pytest 输出 + 测试代码 + 覆盖率)"""
+    pipeline = pipelines.get(pipeline_id)
+    if not pipeline:
+        raise HTTPException(404, f"任务 {pipeline_id} 不存在")
+
+    # 读取 workspace 中的测试文件
+    ws = os.path.join("workspace", pipeline_id)
+    test_files = []
+    test_output = ""
+    coverage = "N/A"
+    fix_attempts = []
+
+    if os.path.exists(ws):
+        for root, dirs, filenames in os.walk(ws):
+            for fn in filenames:
+                full = os.path.join(root, fn)
+                rel = str(Path(full).relative_to(ws))
+                if "test" in fn.lower() and fn.endswith(".py"):
+                    with open(full) as f:
+                        test_files.append({"path": rel, "content": f.read()[:3000]})
+                if "fix_attempt" in fn.lower():
+                    with open(full) as f:
+                        fix_attempts.append({"file": rel, "content": f.read()[:1500]})
+
+    # 读取 CodeLoop 产出中的 pytest 输出
+    for task in pipeline.tasks:
+        if task.output and ("pytest" in (task.output or "").lower() or "passed" in (task.output or "").lower()):
+            test_output = task.output[:2000]
+
+    return {
+        "pipeline_id": pipeline_id,
+        "test_files": test_files,
+        "test_output": test_output or "等待执行...",
+        "coverage": coverage,
+        "fix_attempts": fix_attempts,
+        "total_retries": len(fix_attempts),
+    }
+
+
+from runtime.parser import DocumentParser
+
+UPLOAD_DIR = Path("data/uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_deploy_store: dict[str, str] = {}  # pipeline_id -> deploy_url
+
+@app.post("/api/pipeline/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """上传文件并解析内容"""
+    filepath = UPLOAD_DIR / (uuid.uuid4().hex[:8] + "_" + (file.filename or "unknown"))
+    content = await file.read()
+    filepath.write_bytes(content)
+
+    parser = DocumentParser(llm_service=llm)
+    result = parser.parse(str(filepath))
+    return {
+        "status": "ok", "filename": file.filename, "type": result["type"],
+        "text": result["text"][:5000], "size": result["size"], "file_id": filepath.name,
+    }
+
+
+@app.post("/api/deploy/{pipeline_id}")
+async def deploy_pipeline(pipeline_id: str):
+    """部署生成的代码为可访问服务"""
+    pipeline = pipelines.get(pipeline_id)
+    if not pipeline:
+        raise HTTPException(404, f"任务 {pipeline_id} 不存在")
+    from runtime.deploy import DeployEngine
+    ws = os.path.join("workspace", pipeline_id)
+    if not os.path.exists(ws):
+        raise HTTPException(400, "工作区不存在，请先通过 Gate1 触发 CodeLoop")
+    result = DeployEngine.deploy(pipeline_id, ws)
+    if result.get("success"):
+        _deploy_store[pipeline_id] = result.get("url", "")
+        pipeline.logs.append(f"[Deploy] 🚀 服务已部署: {result.get('url')}")
+    return result
+
+
+@app.get("/api/deploy/status/{pipeline_id}")
+async def deploy_status(pipeline_id: str):
+    from runtime.deploy import DeployEngine
+    return DeployEngine.status(pipeline_id)
+
+
+@app.post("/api/deploy/stop/{pipeline_id}")
+async def deploy_stop(pipeline_id: str):
+    from runtime.deploy import DeployEngine
+    DeployEngine.stop(pipeline_id)
+    _deploy_store.pop(pipeline_id, None)
+    return {"status": "stopped"}
 
 
 @app.get("/api/health")

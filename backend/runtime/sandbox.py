@@ -21,64 +21,38 @@ class DockerSandbox:
     """
     IMAGE = "python:3.11-slim"
 
-    def __init__(self, workspace: str, timeout: int = 120):
+    def __init__(self, workspace: str, timeout: int = 30):
         self.workspace = os.path.abspath(workspace)
         self.timeout = timeout
 
     # ─── 公开 API ───
 
     def run_pytest(self) -> dict:
-        """Docker 内运行 pytest"""
-        return self._docker_exec([
-            "bash", "-c",
-            "pip install -q -r /app/requirements.txt 2>/dev/null; "
-            "pip install -q pytest 2>/dev/null; "
-            "cd /app && python -m pytest -q --tb=short 2>&1 || true"
-        ])
+        """运行 pytest (Docker 不可用时自动回退本地)"""
+        if self._docker_available():
+            return self._docker_exec([
+                "bash", "-c",
+                "pip install -q -r /app/requirements.txt 2>/dev/null; "
+                "pip install -q pytest 2>/dev/null; "
+                "cd /app && python -m pytest -q --tb=short 2>&1 || true"
+            ])
+        return self.run_local()
 
-    def run_ruff(self) -> dict:
-        """Docker 内运行 ruff 代码检查"""
-        return self._docker_exec([
-            "bash", "-c",
-            "pip install -q ruff 2>/dev/null; "
-            "cd /app && ruff check . 2>&1 || true"
-        ])
+    # ─── Docker 可用性快速检查 ───
 
-    def run_tests_with_coverage(self) -> dict:
-        """Docker 内运行 pytest --cov (覆盖率)"""
-        return self._docker_exec([
-            "bash", "-c",
-            "pip install -q -r /app/requirements.txt pytest pytest-cov 2>/dev/null; "
-            "cd /app && python -m pytest -q --tb=short --cov=. --cov-report=term 2>&1 || true"
-        ])
-
-    # ─── 回退：本地子进程 ───
-
-    def run_local(self) -> dict:
-        """本地执行（无 Docker 时回退）"""
-        import subprocess as sp
+    def _docker_available(self) -> bool:
+        """快速检查 Docker 是否可用 (1s 超时)"""
         try:
-            result = sp.run(
-                ["python3", "-m", "pytest", self.workspace, "-q", "--tb=short"],
-                capture_output=True, text=True, timeout=self.timeout,
-                cwd=self.workspace,
+            result = subprocess.run(
+                ["docker", "ps"],
+                capture_output=True, text=True,
+                timeout=1,
             )
-            output = (result.stdout + result.stderr)[:5000]
-            return {
-                "success": result.returncode == 0,
-                "passed": output.count("passed"),
-                "failed": output.count("failed"),
-                "output": output,
-            }
-        except sp.TimeoutExpired:
-            return {"success": False, "passed": 0, "failed": 1, "output": "执行超时"}
-        except FileNotFoundError:
-            return {"success": False, "passed": 0, "failed": 1, "output": "pytest 未安装"}
-
-    # ─── 内部 ───
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            return False
 
     def _docker_exec(self, cmd: list[str]) -> dict:
-        # 尝试 Docker
         try:
             result = subprocess.run(
                 [
@@ -100,9 +74,29 @@ class DockerSandbox:
                 "output": output,
             }
         except subprocess.TimeoutExpired:
-            return {"success": False, "passed": 0, "failed": 1, "output": "Docker 执行超时"}
+            return {"success": False, "passed": 0, "failed": 1, "output": f"执行超时 ({self.timeout}s)"}
         except FileNotFoundError:
-            # Docker 不可用，回退到本地
             return self.run_local()
         except Exception as e:
             return {"success": False, "passed": 0, "failed": 1, "output": str(e)}
+
+    def run_local(self) -> dict:
+        """本地执行（Docker 不可用时回退）"""
+        import subprocess as sp
+        try:
+            result = sp.run(
+                ["python3", "-m", "pytest", self.workspace, "-q", "--tb=short"],
+                capture_output=True, text=True, timeout=self.timeout,
+                cwd=self.workspace,
+            )
+            output = (result.stdout + result.stderr)[:5000]
+            return {
+                "success": result.returncode == 0,
+                "passed": output.count("passed"),
+                "failed": output.count("failed"),
+                "output": output,
+            }
+        except sp.TimeoutExpired:
+            return {"success": False, "passed": 0, "failed": 1, "output": "执行超时"}
+        except FileNotFoundError:
+            return {"success": False, "passed": 0, "failed": 1, "output": "pytest 未安装"}

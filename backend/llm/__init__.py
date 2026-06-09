@@ -74,26 +74,39 @@ class LLMService:
         })
 
     # ============================================================
-    # Architect Agent — 架构设计
+    # Architect Agent — 架构设计 (分层架构 + Mermaid 图)
     # ============================================================
     def design_architecture(self, requirement: str) -> dict:
-        """基于需求生成架构设计"""
-        system = """你是资深架构师 (Architect Agent)。请生成架构设计文档。
-输出 JSON:
+        """基于结构化需求生成架构设计 — 必须与 requirement 有本质差异"""
+        system = """你是资深系统架构师。请基于需求分析，设计分层架构。
+
+## 你必须输出以下层次结构 (各层独立、有本质差异):
+1. **接入层** — 网关/负载均衡/CDN
+2. **业务层** — 微服务拆分、领域逻辑
+3. **数据层** — 数据库/缓存/消息队列
+4. **基础设施层** — 容器编排/监控/日志
+5. **Agent层** — AI Agent 协作拓扑
+
+## Mermaid 图要求:
+- 至少包含 8 个节点
+- 包含数据库节点、缓存节点、微服务节点、前端节点、Agent节点
+- 标注数据流方向
+
+## 输出 JSON 格式:
 {
-  "design_md": "...",              // 完整设计文档
-  "architecture_diagram": "...",   // Mermaid 图
-  "component_list": [{"name":"...", "responsibility":"...", "tech":"..."}],
-  "data_flow": [{"from":"...", "to":"...", "data":"..."}],
-  "api_design": [{"method":"...", "path":"...", "request":"...", "response":"..."}]
+  "design_md": "完整的 Markdown 架构设计文档 (技术选型理由、分层说明、关键决策)",
+  "architecture_diagram": "graph TD\\n    A[...] --> B[...]\\n    ...(至少8个节点)",
+  "component_list": [{"name":"...", "layer":"接入/业务/数据/基础/Agent", "responsibility":"...", "tech":"..."}],
+  "data_flow": [{"from":"...", "to":"...", "protocol":"HTTP/gRPC/消息队列", "data":"..."}],
+  "api_design": [{"method":"GET|POST|PUT|DELETE", "path":"/api/...", "description":"...", "request_body":"...", "response":"..."}]
 }"""
-        raw = self._call(system, requirement[:3000])
+        raw = self._call(system, requirement[:4000])
         return self._safe_parse(raw, {
-            "design_md": f"## 架构设计\n\n基于需求分析，采用微服务架构。",
-            "architecture_diagram": "graph TD\n    A[用户] --> B[网关]\n    B --> C[业务服务]",
-            "component_list": [{"name": "API 网关", "responsibility": "请求路由与鉴权", "tech": "FastAPI"}],
-            "data_flow": [{"from": "前端", "to": "后端", "data": "HTTP 请求"}],
-            "api_design": [{"method": "POST", "path": "/api/v1/process", "request": "JSON Body", "response": "JSON"}],
+            "design_md": f"## 系统架构设计\n\n{requirement[:200]}\n\n### 分层架构\n- 接入层: Nginx/FastAPI 网关\n- 业务层: 微服务集群\n- 数据层: PostgreSQL + Redis\n- 基础设施: Docker/K8s",
+            "architecture_diagram": "graph TD\n    A[客户端] --> B[Nginx网关]\n    B --> C[FastAPI]\n    C --> D[业务服务]\n    D --> E[(PostgreSQL)]\n    D --> F[(Redis)]\n    C --> G[Agent调度器]\n    G --> H[CodeLoop]",
+            "component_list": [{"name": "API网关", "layer": "接入", "responsibility": "路由/限流/鉴权", "tech": "FastAPI"}],
+            "data_flow": [{"from": "客户端", "to": "网关", "protocol": "HTTPS", "data": "REST请求"}],
+            "api_design": [{"method": "POST", "path": "/api/v1/process", "description": "主处理接口", "request_body": "JSON", "response": "JSON"}],
         })
 
     # ============================================================

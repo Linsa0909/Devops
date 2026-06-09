@@ -1,94 +1,65 @@
 #!/bin/bash
-# AgentDev OS — 一键启动 (后端 + 前端)
+# AgentDev OS — 一键启动 (Gitea + AgentDev OS)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo ""
 echo "╔═══════════════════════════════════════════════╗"
-echo "║        🚀 AgentDev OS 启动脚本              ║"
-echo "║  端到端软件需求 Agent 平台                   ║"
+echo "║        🚀 AgentDev OS                       ║"
+echo "║  端到端软件需求 Agent 平台                    ║"
 echo "╚═══════════════════════════════════════════════╝"
 echo ""
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ---- 0. Gitea 仓库服务 ----
+GITEA_DIR="$SCRIPT_DIR/backend/gitea"
+if [ -f "$GITEA_DIR/gitea" ]; then
+    echo "📦 [0/2] 启动 Gitea 仓库服务..."
+    cd "$GITEA_DIR"
+    chmod +x gitea 2>/dev/null
 
-# 1. 启动后端
-echo "📦 [1/2] 启动后端服务 (FastAPI)..."
+    # 首次初始化
+    if [ ! -f "gitea.db" ]; then
+        ./gitea migrate -c app.ini 2>/dev/null
+        GITEA_WORK_DIR="$GITEA_DIR/data" ./gitea admin user create \
+            --admin --username devops --password devops123 --email devops@local \
+            -c app.ini 2>/dev/null
+    fi
+
+    # 释放 3000 端口
+    OLD_GIT=$(lsof -ti:3000 2>/dev/null)
+    [ -n "$OLD_GIT" ] && kill -9 $OLD_GIT 2>/dev/null
+
+    nohup ./gitea web --port 3000 -c app.ini > /dev/null 2>&1 &
+    echo "   ✅ Gitea: http://localhost:3000 (devops/devops123)"
+else
+    echo "   ⚠️  Gitea 未找到，跳过 (Git 推送将不可用)"
+fi
+
+# ---- 1. AgentDev OS 后端 ----
 cd "$SCRIPT_DIR/backend"
+echo "📦 [1/2] AgentDev OS 后端..."
 
-# 虚拟环境
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
-fi
-source .venv/bin/activate
-pip install -r requirements.txt -q
-
-# 安装 CLI 依赖
-echo "📦 [1.5/2] 安装 CLI 工具依赖..."
-pip install click pyyaml httpx -q 2>/dev/null
-echo "   ✅ CLI 可用: ai-factory submit '需求' -d '描述'"
-
-# .env
-if [ ! -f ".env" ]; then
-    cp .env.example .env
-    echo "⚠️  已创建 .env，请编辑填入 DEEPSEEK_API_KEY（留空=MOCK模式）"
-fi
-
-# 释放占用端口
-OLD_PID=$(lsof -ti:8000 2>/dev/null)
-if [ -n "$OLD_PID" ]; then
-    echo "⚠️  端口 8000 被占用 (PID: $OLD_PID)，正在释放..."
-    kill -9 $OLD_PID 2>/dev/null
-    sleep 1
-fi
-
-# 后端后台运行 (不需要 --reload，因为后台服务重启靠脚本本身)
-uvicorn main:app --host 0.0.0.0 --port 8000 &
-BACKEND_PID=$!
-
-# 验证后端启动 (最多重试 20 次，每次 0.5s，共 10s)
-READY=0
-for i in $(seq 1 20); do
-    sleep 0.5
-    if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
-        READY=1
-        break
-    fi
-    echo -n "."
-done
-echo ""
-if [ "$READY" -eq 1 ]; then
-    echo "   ✅ 后端就绪 (http://localhost:8000)"
-    echo "   📖 API 文档: http://localhost:8000/docs"
+    source .venv/bin/activate
+    pip install fastapi uvicorn pydantic httpx python-dotenv aiofiles click pyyaml python-docx PyPDF2 -q
 else
-    echo "   ❌ 后端启动超时 (PID: $BACKEND_PID)"
-    kill $BACKEND_PID 2>/dev/null
-    exit 1
+    source .venv/bin/activate
 fi
 
-# 2. 打开前端
-echo ""
-echo "🌐 [2/2] 服务已就绪"
-echo ""
-echo "   访问地址: http://localhost:8000 (前后端联动)"
-echo "   API 文档: http://localhost:8000/docs"
-echo ""
-echo "   CLI 命令:"
-echo "   ./ai-factory submit '需求名称' -d '需求描述'"
-echo "   ./ai-factory status <task_id>"
-echo "   ./ai-factory gate approve -p <task_id> -g Gate1"
-echo ""
+[ ! -f ".env" ] && cp .env.example .env
 
-# 尝试自动打开
-if command -v xdg-open &> /dev/null; then
-    xdg-open "$SCRIPT_DIR/index.html" 2>/dev/null
-elif command -v open &> /dev/null; then
-    open "$SCRIPT_DIR/index.html" 2>/dev/null
-fi
+OLD_8K=$(lsof -ti:8000 2>/dev/null)
+[ -n "$OLD_8K" ] && kill -9 $OLD_8K 2>/dev/null
 
+echo ""
 echo "╔═══════════════════════════════════════════════╗"
-echo "║   🟢 已启动                                  ║"
-echo "║   http://localhost:8000                      ║"
+echo "║   🟢 启动完成                                ║"
+echo "║   AgentDev OS: http://localhost:8000         ║"
+echo "║   Gitea 仓库:  http://localhost:3000         ║"
+echo "║   API 文档:    http://localhost:8000/docs    ║"
 echo "║                                              ║"
 echo "║   按 Ctrl+C 停止                              ║"
 echo "╚═══════════════════════════════════════════════╝"
+echo ""
 
-# 等待后台进程
-wait $BACKEND_PID
+exec uvicorn main:app --host 0.0.0.0 --port 8000
