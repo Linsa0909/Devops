@@ -1152,8 +1152,6 @@
             setActiveAgent('pm');
             if (store && store.startExecution) store.startExecution();
             if (appendLog) appendLog('[M5] 多 Agent 协同启动...');
-
-            // 每 2 秒轮询后端
             timerRef.current = setInterval(function() {
                 fetchAgentStatus();
                 var pid = (pipeline && pipeline.task_id) || window.__pipelineId;
@@ -1186,92 +1184,77 @@
             { id: 'devops', name: 'DevOps', icon: '🚀', desc: '构建推送', status: 'pending' },
         ];
 
-      return (
-        <div className="grid grid-cols-3 gap-8 animate-fadeIn">
-          {/* 左侧 DAG 拓扑 */}
-          <div className="col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col h-[480px]">
-            <div className="flex items-center justify-between mb-5 shrink-0">
-              <h3 className="text-base font-bold text-slate-800">🤖 LangGraph 多 Agent 协同拓扑</h3>
-              {isRunning && (
-                <span className="text-xs px-2.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-600 rounded-md animate-pulse">
-                  ⚡ Agent 密集通信中
-                </span>
-              )}
-            </div>
-            <div className="flex-1 flex items-center justify-center">
-              <div className="grid grid-cols-4 gap-5 w-full max-w-2xl">
-                  {agents.map(function(a, idx) {
-                    var isActive = activeAgent === a.id;
-                    var isDone = a.status === 'done';
-                    return (
-                      <div key={a.id} className="flex flex-col items-center">
-                        <div className={'p-3 rounded-xl border-2 text-center transition-all w-full ' + (
-                          isActive
-                            ? 'border-indigo-500 bg-indigo-50 shadow-md ring-2 ring-indigo-200 scale-105'
-                            : isDone
-                              ? 'border-emerald-300 bg-emerald-50'
-                              : 'border-slate-100 bg-slate-50'
-                        )}>
-                          <p className="text-xl mb-0.5">{a.icon}</p>
-                          <p className="text-[11px] font-bold text-slate-700">{a.name}</p>
-                          <p className="text-[9px] text-slate-400">{a.desc}</p>
-                          {a.output && <p className="text-[8px] text-indigo-500 mt-0.5 leading-tight">{a.output.substring(0,40)}</p>}
-                        </div>
-                        {idx < agents.length - 1 && (
-                          <div className={'h-6 w-0.5 ' + (isDone ? 'bg-emerald-300' : isRunning ? 'bg-indigo-300 animate-pulse' : 'bg-slate-200')} />
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
-            <div className="flex items-center justify-between border-t border-slate-100 pt-4 shrink-0">
-              <button
-                onClick={handleStart}
-                disabled={isRunning}
-                className={'px-5 py-2.5 rounded-xl text-sm font-medium transition-all ' + (
-                  isRunning ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800 text-white shadow-xs'
-                )}
-              >
-                {isRunning ? '⏳ Agent 执行中...' : activeAgent === 'done' ? '🔄 重新执行' : '🚀 启动多 Agent 构建'}
-              </button>
-              {!isRunning && (pipeline.progress || 0) > 50 && (
-                <button
-                  onClick={() => navigate('qa')}
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium shadow-sm transition-all pulse-glow"
-                >
-                  进入自动化验证 QA ➔
-                </button>
-              )}
-            </div>
-          </div>
+        var agentCards = [];
+        for (var i = 0; i < agents.length; i++) {
+            var a = agents[i];
+            var isActive = activeAgent === a.id;
+            var isDone = a.status === 'done';
+            var cardClass = 'p-3 rounded-xl border-2 text-center w-full transition-all ';
+            if (isActive) { cardClass += 'border-indigo-500 bg-indigo-50 shadow-md ring-2 ring-indigo-200 scale-105'; }
+            else if (isDone) { cardClass += 'border-emerald-300 bg-emerald-50'; }
+            else { cardClass += 'border-slate-100 bg-slate-50'; }
+            var lineClass = 'h-6 w-0.5 ';
+            if (isDone) { lineClass += 'bg-emerald-300'; }
+            else if (isRunning) { lineClass += 'bg-indigo-300 animate-pulse'; }
+            else { lineClass += 'bg-slate-200'; }
+            agentCards.push(
+                React.createElement('div', { key: a.id, className: 'flex flex-col items-center' },
+                    React.createElement('div', { className: cardClass },
+                        React.createElement('p', { className: 'text-xl mb-0.5' }, a.icon),
+                        React.createElement('p', { className: 'text-[11px] font-bold text-slate-700' }, a.name),
+                        React.createElement('p', { className: 'text-[9px] text-slate-400' }, a.desc),
+                        a.output ? React.createElement('p', { className: 'text-[8px] text-indigo-500 mt-0.5 leading-tight' }, a.output.substring(0, 40)) : null
+                    ),
+                    i < agents.length - 1 ? React.createElement('div', { className: lineClass }) : null
+                )
+            );
+        }
 
-          {/* 右侧 Prompt 追踪 */}
-          <div className="col-span-1 bg-slate-900 text-slate-200 rounded-2xl p-4 font-mono text-xs flex flex-col h-[480px] shadow-xl">
-            <div className="text-[10px] text-slate-500 border-b border-slate-800 pb-1.5 uppercase tracking-wider font-sans font-bold shrink-0">
-              ⚡ Agent Prompt 实时追踪
-            </div>
-            <div className="flex-1 overflow-y-auto pt-3 space-y-2">
-              {agentData.length === 0 ? (
-                <div className="text-slate-600 text-center pt-20 font-sans text-sm">等待启动 Agent 协同任务…</div>
-              ) : (
-                agents.map(function(a, i) {
-                  return (
-                    <div key={i} className="text-emerald-400 text-[11px] leading-relaxed log-line p-1.5 hover:bg-slate-800/50 rounded">
-                      [{a.status === 'done' ? '✅' : a.status === 'running' ? '🔄' : '⬜'}] {a.name}: {a.output || '等待调度...'}
-                    </div>
-                  );
-                }))
-            </div>
-          </div>
-        </div>
-      );
+        var promptLines = [];
+        for (var j = 0; j < agents.length; j++) {
+            var b = agents[j];
+            var icon = b.status === 'done' ? '✅' : b.status === 'running' ? '🔄' : '⬜';
+            promptLines.push(
+                React.createElement('div', { key: j, className: 'text-emerald-400 text-[11px] leading-relaxed log-line p-1.5 hover:bg-slate-800/50 rounded' },
+                    '[' + icon + '] ' + b.name + ': ' + (b.output || '等待调度...')
+                )
+            );
+        }
+
+        return React.createElement('div', { className: 'grid grid-cols-3 gap-8 animate-fadeIn' },
+            React.createElement('div', { className: 'col-span-2 bg-white rounded-2xl border border-slate-200 p-6 flex flex-col h-[480px]' },
+                React.createElement('div', { className: 'flex items-center justify-between mb-5 shrink-0' },
+                    React.createElement('h3', { className: 'text-base font-bold text-slate-800' }, '🤖 LangGraph 多 Agent 协同拓扑'),
+                    isRunning ? React.createElement('span', { className: 'text-xs px-2.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-600 rounded-md animate-pulse' }, '⚡ Agent 密集通信中') : null
+                ),
+                React.createElement('div', { className: 'flex-1 flex items-center justify-center' },
+                    React.createElement('div', { className: 'grid grid-cols-6 gap-3 w-full max-w-4xl' }, agentCards)
+                ),
+                React.createElement('div', { className: 'flex items-center justify-between border-t border-slate-100 pt-4 shrink-0' },
+                    React.createElement('button', {
+                        onClick: handleStart, disabled: isRunning,
+                        className: 'px-5 py-2.5 rounded-xl text-sm font-medium ' + (isRunning ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800 text-white shadow-xs')
+                    }, isRunning ? '⏳ Agent 执行中...' : activeAgent === 'done' ? '🔄 重新执行' : '🚀 启动多 Agent 构建'),
+                    (!isRunning && (pipeline.progress || 0) > 30) ? React.createElement('button', {
+                        onClick: function() { navigate('qa'); },
+                        className: 'px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium shadow-sm transition-all pulse-glow'
+                    }, '进入验证 QA ➔') : null
+                )
+            ),
+            React.createElement('div', { className: 'col-span-1 bg-slate-900 text-slate-200 rounded-2xl p-4 font-mono text-xs flex flex-col h-[480px] shadow-xl' },
+                React.createElement('div', { className: 'text-[10px] text-slate-500 border-b border-slate-800 pb-1.5 uppercase tracking-wider font-sans font-bold shrink-0' }, '⚡ Agent Prompt 实时追踪'),
+                React.createElement('div', { className: 'flex-1 overflow-y-auto pt-3 space-y-2' },
+                    agentData.length === 0
+                        ? React.createElement('div', { className: 'text-slate-600 text-center pt-20 font-sans text-sm' }, '等待启动 Agent 协同任务...')
+                        : promptLines
+                )
+            )
+        );
     }
 
     // ================================================================
     // 9️⃣ M6 — 自动化验证 QA 面板
     // ================================================================
-    function M6QA() {
       var store = useStoreState();
       var releaseProduct = store.releaseProduct;
       var appendLog = store.appendLog;
