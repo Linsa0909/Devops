@@ -100,14 +100,63 @@ class LLMService:
   "data_flow": [{"from":"...", "to":"...", "protocol":"HTTP/gRPC/消息队列", "data":"..."}],
   "api_design": [{"method":"GET|POST|PUT|DELETE", "path":"/api/...", "description":"...", "request_body":"...", "response":"..."}]
 }"""
-        raw = self._call(system, requirement[:4000])
+        raw = self._call(system, f"## 需求概述\n{requirement[:500]}\n\n## 完整需求上下文\n{requirement[:3000]}", temperature=0.3)
         return self._safe_parse(raw, {
-            "design_md": f"## 系统架构设计\n\n{requirement[:200]}\n\n### 分层架构\n- 接入层: Nginx/FastAPI 网关\n- 业务层: 微服务集群\n- 数据层: PostgreSQL + Redis\n- 基础设施: Docker/K8s",
-            "architecture_diagram": "graph TD\n    A[客户端] --> B[Nginx网关]\n    B --> C[FastAPI]\n    C --> D[业务服务]\n    D --> E[(PostgreSQL)]\n    D --> F[(Redis)]\n    C --> G[Agent调度器]\n    G --> H[CodeLoop]",
-            "component_list": [{"name": "API网关", "layer": "接入", "responsibility": "路由/限流/鉴权", "tech": "FastAPI"}],
-            "data_flow": [{"from": "客户端", "to": "网关", "protocol": "HTTPS", "data": "REST请求"}],
-            "api_design": [{"method": "POST", "path": "/api/v1/process", "description": "主处理接口", "request_body": "JSON", "response": "JSON"}],
+            "design_md": f"## 系统架构设计文档\n\n### 1. 架构决策\n基于需求分析，本系统采用以下架构方案：\n\n- **接入层**: Nginx 反向代理 + FastAPI 网关，提供限流、鉴权、日志\n- **业务层**: 微服务拆分，每个业务域独立部署\n- **数据层**: PostgreSQL 主库 + Redis 缓存 + RabbitMQ 消息队列\n- **基础设施层**: Docker Compose 部署 + Prometheus 监控\n- **Agent 层**: LangGraph 状态机编排多 Agent 协作\n\n### 2. 技术栈\n- 后端: FastAPI + SQLAlchemy + Pydantic\n- 前端: React + TailwindCSS\n- 数据库: PostgreSQL 15\n- 缓存: Redis 7\n- 消息: RabbitMQ\n\n### 3. 关键设计决策\n- 采用 CQRS 模式分离读写\n- API 版本化 (/api/v1/...)\n- JWT 无状态认证\n- 异步任务队列处理耗时操作\n\n### 4. 安全设计\n- API Token 过期时间 ≤ 7 天\n- 数据传输全程 HTTPS\n- 日志脱敏处理\n- 容器镜像 Trivy 扫描",
+            "architecture_diagram": "graph TD\n    A[用户浏览器] --> B[Nginx 网关]\n    B --> C[FastAPI 路由]\n    C --> D[认证服务]\n    C --> E[业务服务A]\n    C --> F[业务服务B]\n    E --> G[(PostgreSQL)]\n    E --> H[(Redis缓存)]\n    F --> G\n    F --> I[RabbitMQ]\n    I --> J[异步Worker]\n    C --> K[LangGraph Agent]\n    K --> L[CodeLoop 沙箱]",
+            "component_list": [
+                {"name": "Nginx 网关", "layer": "接入", "responsibility": "负载均衡/SSL终止/静态资源", "tech": "Nginx"},
+                {"name": "FastAPI 路由", "layer": "接入", "responsibility": "请求分发/参数校验", "tech": "FastAPI"},
+                {"name": "认证服务", "layer": "业务", "responsibility": "JWT签发/验证/刷新", "tech": "FastAPI+PyJWT"},
+                {"name": "业务服务", "layer": "业务", "responsibility": "核心业务逻辑", "tech": "FastAPI+SQLAlchemy"},
+                {"name": "PostgreSQL", "layer": "数据", "responsibility": "持久化存储", "tech": "PostgreSQL 15"},
+                {"name": "Redis", "layer": "数据", "responsibility": "缓存/会话/限流", "tech": "Redis 7"},
+                {"name": "RabbitMQ", "layer": "数据", "responsibility": "异步消息队列", "tech": "RabbitMQ"},
+                {"name": "LangGraph Agent", "layer": "Agent", "responsibility": "多Agent编排/状态管理", "tech": "LangGraph+DeepSeek"},
+            ],
+            "data_flow": [
+                {"from": "浏览器", "to": "Nginx", "protocol": "HTTPS", "data": "HTTP请求"},
+                {"from": "Nginx", "to": "FastAPI", "protocol": "HTTP", "data": "代理请求"},
+                {"from": "FastAPI", "to": "业务服务", "protocol": "HTTP/gRPC", "data": "业务数据"},
+                {"from": "业务服务", "to": "PostgreSQL", "protocol": "TCP", "data": "SQL查询"},
+                {"from": "业务服务", "to": "Redis", "protocol": "TCP", "data": "缓存读写"},
+            ],
+            "api_design": [
+                {"method": "POST", "path": "/api/v1/auth/login", "description": "用户登录", "request_body": "{\"username\":\"...\",\"password\":\"...\"}", "response": "{\"token\":\"...\"}"},
+                {"method": "GET", "path": "/api/v1/health", "description": "健康检查", "request_body": "—", "response": "{\"status\":\"ok\"}"},
+            ],
         })
+
+    # ============================================================
+    # Rules Agent — 基于项目上下文生成自定义规则
+    # ============================================================
+    def generate_project_rules(self, requirement: str, design: str) -> list[dict]:
+        """基于具体项目需求生成针对性规则约束"""
+        system = """你是软件安全与质量专家。请基于以下项目的具体需求，生成 4-6 条针对性的规则约束。
+
+## 你必须返回一个 JSON 数组，包含 4-6 条规则：
+[
+  {"id": "R-...", "category": "安全|性能|规范", "title": "规则名称", "description": "具体约束内容"},
+  ...
+]
+
+## 要求:
+- 必须返回数组格式，至少4条
+- 每条规则必须针对这个具体项目
+- 安全规则：针对本项目的数据敏感点(至少1条)
+- 性能规则：针对本项目的性能瓶颈(至少1条)  
+- 规范规则：针对本项目的技术栈(至少1条)"""
+        user = f"## 需求\n{requirement[:2000]}\n\n## 架构设计\n{design[:2000]}"
+        raw = self._call(system, user, temperature=0.3)
+        parsed = self._safe_parse(raw, [
+            {"id": "R-C1", "category": "安全", "title": "敏感数据加密存储", "description": "用户个人信息必须AES-256加密后存储"},
+            {"id": "R-C2", "category": "性能", "title": "接口响应时间 ≤ 500ms", "description": "核心业务接口P99响应时间不超过500ms"},
+            {"id": "R-C3", "category": "规范", "title": "统一异常处理", "description": "所有API必须返回标准化的错误响应格式"},
+            {"id": "R-C4", "category": "安全", "title": "输入参数校验", "description": "所有用户输入必须经过Pydantic模型校验"},
+        ])
+        if isinstance(parsed, dict):
+            return [parsed]
+        return parsed
 
     # ============================================================
     # Developer Agent — 代码生成
@@ -219,6 +268,14 @@ class LLMService:
                 "improvements": ["添加类型注解", "增加异常处理"],
                 "summary": "代码质量良好，通过审查。",
             }, ensure_ascii=False)
+        if "软件安全与质量专家" in system:
+            return json.dumps([
+                {"id": "R-C1", "category": "安全", "title": "敏感数据加密存储", "description": "用户个人信息必须AES-256加密后存储，密钥通过环境变量注入"},
+                {"id": "R-C2", "category": "安全", "title": "审批操作审计日志", "description": "所有审批操作（通过/驳回/撤销）必须记录审计日志，包含操作人、时间、IP、操作类型"},
+                {"id": "R-C3", "category": "性能", "title": "接口响应时间 ≤ 500ms", "description": "核心业务接口P99响应时间不超过500ms，必须实现数据库查询缓存"},
+                {"id": "R-C4", "category": "规范", "title": "统一异常处理", "description": "所有API必须返回标准化的错误响应格式：{\"code\":...,\"message\":\"...\",\"data\":null}"},
+                {"id": "R-C5", "category": "规范", "title": "API参数校验", "description": "所有用户输入必须经过Pydantic模型校验，禁止在业务逻辑中直接使用原始输入"},
+            ], ensure_ascii=False)
         if "知识管理" in system:
             return json.dumps({
                 "refined_prompts": [{"role": "system", "content": "优化后的系统提示词"}],
@@ -231,22 +288,43 @@ class LLMService:
 
     @staticmethod
     def _safe_parse(raw: str, default: dict) -> dict:
-        """安全解析 JSON — 处理 dict/list/string 三种情况"""
+        """安全解析 JSON — always returns dict, falling back to default on any unexpected format"""
         if raw is None:
             return default
         if isinstance(raw, dict):
-            return raw
+            merged = dict(default)
+            merged.update(raw)
+            return merged
         if isinstance(raw, list):
-            return raw[0] if raw and isinstance(raw[0], dict) else default
-        # 提取 JSON 块
+            # If raw is a list, take first dict item and merge with default
+            if raw and isinstance(raw[0], dict):
+                merged = dict(default)
+                merged.update(raw[0])
+                return merged
+            return default
+        # Try to extract JSON from code fences
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0]
         elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0]
+            parts = raw.split("```")
+            # Try each ``` block — look for one with "design_md" or "{"
+            for i in range(1, len(parts), 2):
+                block = parts[i].strip()
+                if "design_md" in block or "architecture" in block or block.startswith("{"):
+                    raw = block
+                    break
         try:
             parsed = json.loads(raw.strip())
             if isinstance(parsed, list):
-                return parsed[0] if parsed and isinstance(parsed[0], dict) else default
-            return parsed
+                if parsed and isinstance(parsed[0], dict):
+                    merged = dict(default)
+                    merged.update(parsed[0])
+                    return merged
+                return default
+            if isinstance(parsed, dict):
+                merged = dict(default)
+                merged.update(parsed)
+                return merged
+            return default
         except:
             return default

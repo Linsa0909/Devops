@@ -137,6 +137,21 @@ async def start_pipeline(req: IdeaSubmitRequest):
             name="数据流设计", path="docs/data_flow.md",
             content=json.dumps(design_result.get("data_flow", []), ensure_ascii=False, indent=2), task_id=pipeline.id))
 
+        # ── Rules Agent: 基于项目上下文生成自定义规则 ──
+        pipeline.logs.append("[LLM] Rules Agent 基于项目生成自定义规则...")
+        project_rules = llm.generate_project_rules(req_md, design_md)
+        for pr in project_rules:
+            if isinstance(pr, dict):
+                rule = Rule(
+                    id=pr.get("id", f"R-A{len(pipeline.rules)+1}"),
+                    category=RuleCategory(pr.get("category", "自定义")),
+                    title=pr.get("title", ""),
+                    description=pr.get("description", ""),
+                    active=True,
+                )
+                pipeline.rules.append(rule)
+        pipeline.logs.append(f"[LLM] ✅ 生成 {len(project_rules)} 条项目定制规则")
+
         # ── Guardrails 检查需求+设计 ──
         pipeline.logs.append("[Guardrails] 检查需求与设计合规性...")
         context = {"code": design_md, "logs": "\n".join(pipeline.logs[-10:]),
