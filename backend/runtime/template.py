@@ -290,8 +290,14 @@ def test_invalid_request():
 '''
 
     def _conftest_py(self) -> str:
-        return '''import sys, os
+        return '''import sys, os, pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.models.base import init_db
+
+@pytest.fixture(autouse=True, scope="session")
+def setup_db():
+    init_db()
+    yield
 '''
 
     def _requirements(self) -> str:

@@ -76,30 +76,15 @@ class DeveloperAgent:
   {{"file_path": "app/api/router.py", "content": "from fastapi import APIRouter, Depends\\n..."}}
 ]}}
 Only output JSON, no explanation."""
-        # ── Step 2: LLM 生成 (带超时) ──
-        llm_output = None
+        # ── Step 2: LLM 生成 (25s timeout) ──
+        llm_output = '{"files": []}'
         try:
-            import threading as _t
-            results = []
-            def _call():
-                try:
-                    results.append(self.llm._call(
-                        system="You are a Python engineer. ONLY return valid JSON. No markdown.",
-                        user=prompt, temperature=0.2,
-                    ))
-                except Exception as e:
-                    results.append(e)
-            t = _t.Thread(target=_call, daemon=True)
-            t.start()
-            t.join(timeout=25)  # 25s timeout
-            if not results:
-                raise TimeoutError("DeepSeek call timed out (45s)")
-            if isinstance(results[0], Exception):
-                raise results[0]
-            llm_output = results[0]
+            llm_output = self.llm._call(
+                system="You are a Python engineer. ONLY return valid JSON. No markdown.",
+                user=prompt, temperature=0.2, timeout=25,
+            )
         except Exception as e:
             print(f"[DeveloperAgent] LLM call failed: {e}")
-            llm_output = '{"files": []}'
         
         files = self._parse_files(llm_output)
 
@@ -161,6 +146,12 @@ Only output JSON, no explanation."""
                 if "{" in p and "files" in p: raw = p; break
         try:
             data = json.loads(raw.strip())
-            return data.get("files", [])
+            files = data.get("files", [])
+            # Ensure each file has safe defaults
+            for f in files:
+                if not isinstance(f.get("test_file_path"), str):
+                    f.pop("test_file_path", None)
+                    f.pop("test_content", None)
+            return files
         except:
-            return [{"file_path": "app/api/router.py", "content": f"# Generated\n{raw[:2000]}"}]
+            return []

@@ -27,7 +27,7 @@ class WorkspaceWriter:
             written.append(file_path)
 
             # 同时写入测试文件（如果有）
-            if "test_file_path" in item and "test_content" in item:
+            if item.get("test_file_path") and item.get("test_content"):
                 test_path = self.root / item["test_file_path"].lstrip("/")
                 test_path.parent.mkdir(parents=True, exist_ok=True)
                 test_path.write_text(item["test_content"], encoding="utf-8")

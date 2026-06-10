@@ -21,10 +21,10 @@ class LLMService:
     def __init__(self):
         self.api_key = DEEPSEEK_API_KEY
         self.base_url = DEEPSEEK_BASE_URL
-        self.client = httpx.Client(timeout=120)
+        self.client = httpx.Client(timeout=30)
 
-    def _call(self, system: str, user: str, temperature: float = 0.3) -> str:
-        """调用 DeepSeek API"""
+    def _call(self, system: str, user: str, temperature: float = 0.3, timeout: int = 30) -> str:
+        """调用 DeepSeek API (带超时保护)"""
         if not self.api_key:
             return self._mock_response(system, user)
 
@@ -41,6 +41,7 @@ class LLMService:
                     "temperature": temperature,
                     "max_tokens": 4096,
                 },
+                timeout=timeout,
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
