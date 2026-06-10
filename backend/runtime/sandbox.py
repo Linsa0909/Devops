@@ -13,12 +13,14 @@ class DockerSandbox:
         self.python = sys.executable  # Use the venv's python
 
     def run_pytest(self) -> dict:
-        """运行 pytest"""
+        """运行 pytest, 使用 venv python + PYTHONPATH"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = self.workspace + ":" + env.get("PYTHONPATH", "")
         try:
             result = subprocess.run(
-                [self.python, "-m", "pytest", ".", "-q", "--tb=line"],
+                [self.python, "-m", "pytest", ".", "-q", "--tb=line", "-p", "no:warnings"],
                 capture_output=True, text=True, timeout=self.timeout,
-                cwd=self.workspace,
+                cwd=self.workspace, env=env,
             )
             output = (result.stdout + result.stderr)[:5000]
             return {
