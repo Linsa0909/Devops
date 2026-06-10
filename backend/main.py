@@ -218,8 +218,11 @@ async def gate_action(req: GateActionRequest):
         def _run_codeloop():
             import traceback as _tb
             try:
+                # 🔥 取完整的 requirement.md + design.md 内容
+                full_req = next((a.content for a in pipeline.artifacts if a.type.value == "requirement"), pipeline.description)
+                full_design = next((a.content for a in pipeline.artifacts if a.type.value == "design"), "")
                 loop_result = PipelineEngine.run_code_execution_loop(
-                    pipeline, pipeline.description, design_content)
+                    pipeline, full_req, full_design)
                 pipeline.logs.append(f"[System] ✅ CodeLoop 完成: "
                     f"pytest={'PASS' if loop_result.get('passed') else 'FAIL'}, "
                     f"review={loop_result.get('reviews',{}).get('score',0)}/100")

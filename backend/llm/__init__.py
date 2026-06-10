@@ -21,28 +21,30 @@ class LLMService:
     def __init__(self):
         self.api_key = DEEPSEEK_API_KEY
         self.base_url = DEEPSEEK_BASE_URL
-        self.client = httpx.Client(timeout=30)
 
     def _call(self, system: str, user: str, temperature: float = 0.3, timeout: int = 30) -> str:
-        """调用 DeepSeek API (带超时保护)"""
+        """调用 DeepSeek API (每次新建 client, 避免 WSL 网络 hang)"""
         if not self.api_key:
             return self._mock_response(system, user)
 
         try:
-            resp = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": MODEL,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": 4096,
-                },
-                timeout=timeout,
-            )
+            # 每次调用新建 client，避免连接池 hang
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": MODEL,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": 4096,
+                    },
+                )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except Exception as e:

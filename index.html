@@ -885,33 +885,92 @@
     }
 
     // ================================================================
+    // PipelineDAG — 交互式全流程 DAG 拓扑
+    // ================================================================
+    function PipelineDAG() {
+        var store = useStoreState();
+        var pipeline = store && store.pipeline || {};
+        var currentStep = store && store.currentStep || 'idea';
+        
+        var stages = [
+            { id: 'idea',       icon: '💡', label: '需求孵化',     desc: '输入想法 + AI评估',           status: 'done' },
+            { id: 'analysis',   icon: '🔍', label: '智能分析',     desc: 'REQ Agent + Architect',       status: currentStep === 'analysis' ? 'running' : currentStep === 'guardrails' || currentStep === 'execution' || currentStep === 'qa' || currentStep === 'release' ? 'done' : 'pending' },
+            { id: 'guardrails', icon: '🛡️', label: '规则约束',    desc: '16条规则 + Gate1',           status: currentStep === 'guardrails' ? 'running' : currentStep === 'execution' || currentStep === 'qa' || currentStep === 'release' ? 'done' : 'pending' },
+            { id: 'execution',  icon: '🤖', label: 'Agent执行',   desc: '代码生成 + Fix修复',         status: currentStep === 'execution' ? 'running' : currentStep === 'qa' || currentStep === 'release' ? 'done' : 'pending' },
+            { id: 'qa',         icon: '🧪', label: '验证QA',      desc: 'pytest + Self-Healing',      status: currentStep === 'qa' ? 'running' : currentStep === 'release' ? 'done' : 'pending' },
+            { id: 'release',    icon: '📦', label: '发布沉淀',    desc: 'Gitea + 部署',               status: currentStep === 'release' ? 'done' : 'pending' },
+        ];
+
+        var subTasks = [
+            { stage: 'idea',       tasks: ['输入产品构想', 'AI 可行性评估', '技术栈建议'] },
+            { stage: 'analysis',   tasks: ['REQ Agent 需求分析', 'Architect 架构设计', 'Mermaid 拓扑生成'] },
+            { stage: 'guardrails', tasks: ['16条规则检查', 'Gate1 人工审批', '规则自定义'] },
+            { stage: 'execution',  tasks: ['ProjectTemplate 骨架', 'DeveloperAgent 生成', 'pytest 本地执行', 'FixAgent 修复(≤5次)'] },
+            { stage: 'qa',         tasks: ['单元测试覆盖率', '规则合规审查', 'Self-Healing'] },
+            { stage: 'release',    tasks: ['Reviewer 5轴审查', 'Git 推送 Gitea', 'Docker 部署', '知识沉淀'] },
+        ];
+
+        var colors = { done: { bg: 'bg-emerald-100', border: 'border-emerald-400', text: 'text-emerald-700', icon: '✅' },
+                       running: { bg: 'bg-indigo-100', border: 'border-indigo-400', text: 'text-indigo-700', icon: '🔄' },
+                       pending: { bg: 'bg-slate-100', border: 'border-slate-200', text: 'text-slate-400', icon: '⬜' } };
+
+        var items = [];
+        for (var i = 0; i < stages.length; i++) {
+            var s = stages[i];
+            var c = colors[s.status] || colors.pending;
+            var sub = null;
+            for (var j = 0; j < subTasks.length; j++) {
+                if (subTasks[j].stage === s.id) { sub = subTasks[j].tasks; break; }
+            }
+
+            var subItems = [];
+            if (sub) {
+                for (var k = 0; k < sub.length; k++) {
+                    subItems.push(React.createElement('div', { key: k, className: 'text-[10px] text-slate-500 py-0.5 pl-2 border-l-2 border-slate-100 ml-2' },
+                        '└ ' + sub[k]));
+                }
+            }
+
+            var gateLabel = null;
+            if (s.id === 'guardrails' || s.id === 'execution' || s.id === 'qa') {
+                var gateMap = { guardrails: 'Gate1', execution: 'Gate2', qa: 'Gate3' };
+                gateLabel = React.createElement('span', { className: 'text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-medium' },
+                    '⏸ ' + gateMap[s.id]);
+            }
+
+            var card = React.createElement('div', { className: 'flex items-start space-x-3 p-3 rounded-xl border-2 ' + c.border + ' ' + c.bg },
+                React.createElement('div', { className: 'text-xl shrink-0 mt-0.5' }, s.icon),
+                React.createElement('div', { className: 'flex-1 min-w-0' },
+                    React.createElement('div', { className: 'flex items-center space-x-2' },
+                        React.createElement('span', { className: 'text-sm font-bold ' + c.text }, s.label),
+                        React.createElement('span', { className: 'text-[10px] ' + c.text }, c.icon),
+                        gateLabel ? gateLabel : null
+                    ),
+                    React.createElement('div', { className: 'text-[11px] text-slate-500 mt-0.5' }, s.desc),
+                    s.status === 'running' ? React.createElement('div', { className: 'text-[10px] text-indigo-600 mt-1 font-medium animate-pulse' }, '▶ 执行中...') : null,
+                    subItems.length > 0 ? React.createElement('div', { className: 'mt-1.5 space-y-0.5' }, subItems) : null
+                )
+            );
+
+            items.push(React.createElement('div', { key: s.id }, card));
+
+            // Arrow between stages
+            if (i < stages.length - 1) {
+                var arrowColor = s.status === 'done' ? 'border-emerald-400' : 'border-slate-200';
+                items.push(React.createElement('div', { key: 'arr-' + i, className: 'flex justify-center py-0.5' },
+                    React.createElement('div', { className: 'w-0.5 h-4 border-l-2 border-dashed ' + arrowColor })));
+            }
+        }
+
+        return React.createElement('div', { className: 'space-y-1 py-1' }, items);
+    }
+
+    // ================================================================
     // 6️⃣ M3 — 智能分析工作台 (Analysis Workbench)
     // ================================================================
     function M3Analysis() {
       const { m3Data, pipeline, confirmAnalysis } = useStoreState();
       const [activeTab, setActiveTab] = useState('req');
-
-      useEffect(function() {
-        // 渲染 Mermaid 架构图
-        var chart = m3Data.mermaidChart;
-        if (chart && typeof mermaid !== 'undefined') {
-          var container = document.getElementById('mermaid-diagram');
-          var fallback = document.getElementById('mermaid-fallback');
-          if (container && fallback) {
-            try {
-              mermaid.render('mermaid-svg', chart).then(function(result) {
-                container.innerHTML = result.svg;
-                container.classList.remove('hidden');
-                fallback.classList.add('hidden');
-              }).catch(function() {
-                fallback.innerHTML = '<span style=\"color:#94a3b8\">架构图解析中...</span><br/><pre style=\"font-size:10px;text-align:left;margin-top:4px\">' + chart + '</pre>';
-              });
-            } catch(e) {
-              fallback.innerHTML = '<span style=\"color:#94a3b8\">架构图渲染失败</span><br/><pre style=\"font-size:10px;text-align:left;margin-top:4px\">' + chart + '</pre>';
-            }
-          }
-        }
-      }, [m3Data.mermaidChart]);
 
       return (
         <div className="grid grid-cols-2 gap-8 animate-fadeIn">
@@ -950,17 +1009,14 @@
             </div>
           </div>
 
-          {/* 右侧：拓扑图 + Gate */}
+          {/* 右侧：流水线拓扑 DAG */}
           <div className="flex flex-col h-[500px] space-y-4">
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex-1 flex flex-col">
               <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3 shrink-0">
-                🧭 系统拓扑与交互时序预演
+                🧭 全流程 DAG 拓扑 — 产品想法到发布沉淀
               </h4>
-              <div className="flex-1 bg-slate-50 rounded-xl border border-slate-100 overflow-hidden flex items-center justify-center" id="mermaid-container">
-                <div className="text-slate-400 text-xs text-center" id="mermaid-fallback">
-                  等待大模型生成架构图...
-                </div>
-                <div id="mermaid-diagram" className="hidden w-full h-full flex items-center justify-center p-4"></div>
+              <div className="flex-1 overflow-y-auto">
+                <PipelineDAG />
               </div>
             </div>
 

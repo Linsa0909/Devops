@@ -1,8 +1,6 @@
-"""
-Developer Agent v3 — 基于骨架增量生成 + 自动补全依赖导入
-"""
+"""Developer Agent v3 — 骨架增量 + subprocess LLM 调用"""
 from __future__ import annotations
-import json, re, os
+import json, re, os, subprocess, sys, tempfile
 from typing import Optional
 from llm import LLMService
 from agents.writer import WorkspaceWriter
@@ -25,133 +23,88 @@ class DeveloperAgent:
         tmpl.scaffold()
 
         rules_text = "\n".join([f"- [{r.get('id','?')}] {r.get('title','?')}" for r in rules if r.get('active', True)])[:500]
+        skills_c = "\n## API: consistent errors, pagination, Pydantic validation\n## TDD: RED-GREEN-REFACTOR, DAMP, Arrange-Act-Assert\n"
 
-        # Skills constraints (from addyosmani/agent-skills)
-        skills_constraints = """
-## API Design Constraints (api-and-interface-design)
-- Contract first: define types BEFORE implementation
-- Consistent error semantics: all errors return {"code": "ERROR_CODE", "message": "..."} 
-- Validate at boundaries: Pydantic at route level, not internal functions
-- Backward compatibility: new fields are optional, never remove/change existing fields
-- Pagination: list endpoints MUST support ?page=1&size=20
+        prompt = f"""Fill 4 target files:
+1. app/models/__init__.py (SQLAlchemy ORM)
+2. app/schemas/request.py (Pydantic)
+3. app/services/logic.py (CRUD)
+4. app/api/router.py (FastAPI, /api/v1 prefix)
 
-## TDD Constraints (test-driven-development)
-- Write test BEFORE implementation (RED → GREEN → REFACTOR)
-- One assertion per concept per test
-- DAMP over DRY: each test tells a complete story
-- Prefer real implementations over mocks
-- Arrange-Act-Assert pattern in every test
+Requirement: {requirement[:1500]}
+Design: {design[:800]}
+Rules: {rules_text}
+{skills_c}
 
-## Frontend Constraints (frontend-ui-engineering)
-- Design system tokens, not raw hex/px values
-- Consistent spacing scale (0.25rem increments)
-- WCAG 2.1 AA: keyboard accessible, ARIA labels, focus management
-- Meaningful empty/error/loading states
-"""
+Output JSON: {{"files":[{{"file_path":"...","content":"..."}}]}}"""
 
-        prompt = f"""You are a Staff Python engineer. Fill ONLY the 4 business logic files.
-
-## Target files (generate these 4)
-1. app/models/__init__.py — SQLAlchemy models (define ALL ORM classes here)
-2. app/schemas/request.py — Pydantic request/response models
-3. app/services/logic.py — Business logic CRUD functions  
-4. app/api/router.py — FastAPI router (/api/v1 prefix)
-
-## Requirement
-{requirement[:2000]}
-
-## Design
-{design[:1000]}
-
-## Constraints
-{rules_text}
-
-{skills_constraints}
-
-## JSON Output format (MUST return exactly 4 files):
-{{"files": [
-  {{"file_path": "app/models/__init__.py", "content": "from app.models.base import Base\\nfrom sqlalchemy import ...\\n\\nclass Message(Base): ..."}},
-  {{"file_path": "app/schemas/request.py", "content": "from pydantic import ..."}},
-  {{"file_path": "app/services/logic.py", "content": "from sqlalchemy.orm import Session\\n..."}},
-  {{"file_path": "app/api/router.py", "content": "from fastapi import APIRouter, Depends\\n..."}}
-]}}
-Only output JSON, no explanation."""
-        # ── Step 2: LLM 生成 (25s timeout) ──
         llm_output = '{"files": []}'
+        # ── LLM: write script to temp file, run as subprocess with hard 60s timeout ──
+        script = '''import httpx, os, json, sys
+try:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        sys.stdout.write('{"files": []}')
+        sys.exit(0)
+    with httpx.Client(timeout=55) as c:
+        r = c.post("https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+            json={"model": "deepseek-chat",
+                  "messages": [{"role":"system","content":"You are a Python engineer. ONLY return valid JSON."},
+                               {"role":"user","content":''' + repr(prompt) + '''}],
+                  "temperature": 0.2, "max_tokens": 4096})
+        sys.stdout.write(r.json()["choices"][0]["message"]["content"])
+except Exception as e:
+    sys.stdout.write('{"files": []}')
+'''
+        import tempfile, subprocess
+        tf = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+        tf.write(script)
+        tf.close()
         try:
-            llm_output = self.llm._call(
-                system="You are a Python engineer. ONLY return valid JSON. No markdown.",
-                user=prompt, temperature=0.2, timeout=25,
-            )
-        except Exception as e:
-            print(f"[DeveloperAgent] LLM call failed: {e}")
-        
-        files = self._parse_files(llm_output)
+            env = os.environ.copy()
+            r = subprocess.run([sys.executable, tf.name], capture_output=True, text=True, timeout=65, env=env)
+            llm_output = r.stdout.strip() or '{"files": []}'
+        except subprocess.TimeoutExpired:
+            llm_output = '{"files": []}'
+        finally:
+            try: os.unlink(tf.name)
+            except: pass
 
-        # ── Write generated files ──
+        files = self._parse_files(llm_output)
         for f in files:
             self.writer.write([f])
-
-        # ── Auto-fix missing model stubs ──
         self._fix_missing_stubs()
 
-        # ── pytest ──
         loop_result = self.retry.execute_with_retry(files)
+        return dict(passed=loop_result["passed"], attempts=loop_result["attempts"],
+                    files=files, file_tree=self.writer.tree(),
+                    fix_history=loop_result.get("history", []),
+                    final_output=loop_result.get("final_output", ""))
 
-        return {
-            "passed": loop_result["passed"],
-            "attempts": loop_result["attempts"],
-            "files": files,
-            "file_tree": self.writer.tree(),
-            "fix_history": loop_result.get("history", []),
-            "final_output": loop_result.get("final_output", ""),
-        }
-
-    # ─── Auto-fix missing imports ───
     def _fix_missing_stubs(self):
-        """Scan all Python files for from/import references to nonexistent modules.
-        Auto-generate stub files for any missing local imports."""
-        py_files = []
         for root, dirs, fnames in os.walk(self.workspace):
             for fn in fnames:
-                if fn.endswith(".py") and "__pycache__" not in root:
-                    py_files.append(os.path.join(root, fn))
+                if not fn.endswith(".py") or "__pycache__" in root: continue
+                c = open(os.path.join(root, fn)).read()
+                for m in re.finditer(r'from\s+(app\.\w+(?:\.\w+)*)\s+import', c):
+                    fp = os.path.join(self.workspace, m.group(1).replace(".", "/") + ".py")
+                    if not os.path.exists(fp):
+                        os.makedirs(os.path.dirname(fp), exist_ok=True)
+                        open(fp, "w").write("# stub\n")
 
-        # Find all `from app.models.xxx import YYY` that refer to missing files
-        missing = {}
-        for fp in py_files:
-            content = open(fp).read()
-            for m in re.finditer(r'from\s+(app\.\w+(?:\.\w+)*)\s+import', content):
-                mod_path = m.group(1).replace(".", "/") + ".py"
-                full_path = os.path.join(self.workspace, mod_path)
-                if not os.path.exists(full_path):
-                    # Create stub
-                    parts = mod_path.split("/")
-                    stub_content = ""
-                    if parts[-1] != "__init__.py":
-                        class_name = os.path.splitext(parts[-1])[0].title().replace("_", "")
-                        stub_content = f"# Auto-generated stub for {m.group(1)}\n\nclass {class_name}:\n    pass\n"
-                    else:
-                        stub_content = f"# Auto-generated stub for {m.group(1)}\n"
-                    dir_path = os.path.dirname(full_path)
-                    os.makedirs(dir_path, exist_ok=True)
-                    open(full_path, "w").write(stub_content)
-
-    # ─── Parse ───
     def _parse_files(self, raw: str) -> list[dict]:
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0]
+        if "```json" in raw: raw = raw.split("```json")[1].split("```")[0]
         elif "```" in raw:
             for p in raw.split("```"):
                 if "{" in p and "files" in p: raw = p; break
         try:
             data = json.loads(raw.strip())
-            files = data.get("files", [])
-            # Ensure each file has safe defaults
-            for f in files:
-                if not isinstance(f.get("test_file_path"), str):
-                    f.pop("test_file_path", None)
-                    f.pop("test_content", None)
-            return files
+            f = data.get("files", [])
+            for x in f:
+                if not isinstance(x.get("test_file_path"), str):
+                    x.pop("test_file_path", None)
+                    x.pop("test_content", None)
+            return f
         except:
             return []
