@@ -26,6 +26,29 @@ class DeveloperAgent:
 
         rules_text = "\n".join([f"- [{r.get('id','?')}] {r.get('title','?')}" for r in rules if r.get('active', True)])[:500]
 
+        # Skills constraints (from addyosmani/agent-skills)
+        skills_constraints = """
+## API Design Constraints (api-and-interface-design)
+- Contract first: define types BEFORE implementation
+- Consistent error semantics: all errors return {"code": "ERROR_CODE", "message": "..."} 
+- Validate at boundaries: Pydantic at route level, not internal functions
+- Backward compatibility: new fields are optional, never remove/change existing fields
+- Pagination: list endpoints MUST support ?page=1&size=20
+
+## TDD Constraints (test-driven-development)
+- Write test BEFORE implementation (RED → GREEN → REFACTOR)
+- One assertion per concept per test
+- DAMP over DRY: each test tells a complete story
+- Prefer real implementations over mocks
+- Arrange-Act-Assert pattern in every test
+
+## Frontend Constraints (frontend-ui-engineering)
+- Design system tokens, not raw hex/px values
+- Consistent spacing scale (0.25rem increments)
+- WCAG 2.1 AA: keyboard accessible, ARIA labels, focus management
+- Meaningful empty/error/loading states
+"""
+
         prompt = f"""You are a Staff Python engineer. Fill ONLY the 4 business logic files.
 
 ## Target files (generate these 4)
@@ -42,6 +65,8 @@ class DeveloperAgent:
 
 ## Constraints
 {rules_text}
+
+{skills_constraints}
 
 ## JSON Output format (MUST return exactly 4 files):
 {{"files": [
@@ -66,7 +91,7 @@ Only output JSON, no explanation."""
                     results.append(e)
             t = _t.Thread(target=_call, daemon=True)
             t.start()
-            t.join(timeout=45)  # 45s timeout
+            t.join(timeout=25)  # 25s timeout
             if not results:
                 raise TimeoutError("DeepSeek call timed out (45s)")
             if isinstance(results[0], Exception):

@@ -74,25 +74,26 @@ class RetryLoop:
         }
 
     def _fix_with_agent(self, error_log: str, code: str, attempt: int) -> list[dict]:
-        """FixAgent — 基于错误日志自动修复代码"""
-        prompt = f"""你是资深修复工程师 (Fix Agent)。测试第 {attempt} 次失败，请修复代码。
+        """FixAgent — 基于错误日志自动修复代码 (TDD: RED→GREEN→REFACTOR)"""
+        prompt = f"""You are a Fix Engineer (TDD mode). Attempt {attempt}. Fix the code to pass tests.
 
-## 错误日志
+## Test Error Log
 ```
 {error_log[:2000]}
 ```
 
-## 当前代码
+## Current Code
 ```
 {code[:3000]}
 ```
 
-## 要求
-- 只修改有问题的部分，其他部分保持不变
-- 修复后返回完整的文件列表（JSON 格式）
-- 每个文件都需要对应的测试文件
+## TDD Constraints
+- RED phase: fix ONLY what's broken to make the test pass
+- GREEN phase: minimal code changes, don't refactor
+- DAMP: keep tests readable and self-contained
+- One assertion per concept
 
-返回 JSON:
+Return JSON:
 {{"files": [{{"file_path":"...","content":"...","test_file_path":"...","test_content":"..."}}]}}
 """
         try:

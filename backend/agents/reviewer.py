@@ -34,42 +34,52 @@ class ReviewerAgent:
 
     def review(self, code: str, design: str, test_result: dict,
                rules: list[dict], exec_history: list[dict]) -> dict:
-        """
-        多维度审查
-        返回: {passed, score, dimensions, issues, suggestions, summary}
-        """
-        prompt = f"""你是资深代码审查员。请按以下维度评审代码。
+        """5轴代码审查 (code-review-and-quality skill)"""
+        prompt = f"""You are a Staff Engineer conducting a 5-axis code review.
 
-## 📋 代码
+## Code
 ```
 {code[:3000]}
 ```
 
-## 🏗️ 设计文档
+## Design
 {design[:1000]}
 
-## 🧪 测试结果
-- 通过: {test_result.get('passed', False)}
-- 历史修复次数: {len(exec_history)}
+## Test Results
+- Passed: {test_result.get('pass', test_result.get('passed', False))}
+- Fix attempts: {len(exec_history)}
 
-## 🛡️ 活跃规则
+## Active Rules
 {json.dumps([r for r in rules if r.get('active')], ensure_ascii=False, indent=2)[:1500]}
 
-请评估这 {len(self.DIMENSIONS)} 个维度:
-{chr(10).join(f'{i+1}. {d}' for i, d in enumerate(self.DIMENSIONS))}
+## Five-Axis Review Framework
+### 1. Correctness
+Edge cases handled? Error paths handled? Tests match spec?
 
-返回 JSON:
+### 2. Readability & Simplicity
+Names clear? Control flow straightforward? Could be fewer lines? Abstractions earning their complexity?
+
+### 3. Architecture  
+Follows existing patterns? Clean module boundaries? No circular dependencies? API contract-first?
+
+### 4. Security
+Input validated at boundaries? Secrets in code? SQL parameterized? External data treated as untrusted?
+
+### 5. Performance
+N+1 queries? Unbounded loops? Missing pagination? Sync operations that should be async?
+
+Return JSON:
 {{
   "passed": true/false,
   "score": 0-100,
-  "dimensions": {{"维度名": "通过/需改进/阻塞", ...}},
-  "issues": [{{"severity":"high/medium/low","file":"...","message":"..."}}],
+  "axes": {{"correctness": "pass/fail/needs_work", "readability": "...", "architecture": "...", "security": "...", "performance": "..."}},
+  "issues": [{{"severity":"Critical|Required|Nit|Optional|FYI", "axis":"correctness|readability|...", "message":"...", "suggestion":"..."}}],
   "suggestions": ["..."],
-  "summary": "一句话总结"
+  "summary": "One-line review verdict"
 }}
 """
         raw = self.llm._call(
-            system="你是资深代码审查员。严格按企业标准审查代码质量、安全性、可维护性。",
+            system="You are a Senior Staff Engineer. Conduct a 5-axis code review. Assign severity labels (Critical/Required/Nit/Optional/FYI).",
             user=prompt,
             temperature=0.1,
         )
@@ -86,8 +96,8 @@ class ReviewerAgent:
             return {
                 "passed": True,
                 "score": 80,
-                "dimensions": {d: "通过" for d in self.DIMENSIONS},
+                "axes": {"correctness": "needs_work", "readability": "pass", "architecture": "pass", "security": "pass", "performance": "pass"},
                 "issues": [],
                 "suggestions": [],
-                "summary": "自动审查完成",
+                "summary": "Auto-review complete",
             }
